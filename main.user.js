@@ -1,19 +1,20 @@
 // ==UserScript==
 // @name         Engineering Design Hub - Reservation Waterfall
 // @namespace    https://designhub-manager.unl.edu/
-// @version      1.0.1
+// @version      1.0.2
 // @description  Dark-mode Gantt chart - ordered models, dynamic tool colors, hide idle printers
 // @match        *://designhub-manager.unl.edu/admin/agenda/*
 // @match        *://designhub-manager.unl.edu/agenda/*
+// @match        */agenda/*
 // @grant        none
-// @license      MIT
 // ==/UserScript==
 
 (function () {
   'use strict';
 
   // ═══════════════════════════════════════════════════════════════════
-  //  PRINTER LIST — edit this array to add/remove printers.
+  //  PRINTER LIST — edit this array to add/remove/reorder printers.
+  //  Rows appear on the waterfall in exactly this order, top to bottom.
   //  Printers with no reservations today are hidden unless you click
   //  "SHOW ALL MODELS".
   // ═══════════════════════════════════════════════════════════════════
@@ -28,14 +29,15 @@
     'Euler',
     'Johnson',
     'Ohm',
+    'Emmy',
+    'Hedy',
+    'Mark',
+    'Ochoa',
     'Kapany',
     'Maiman',
     'GoldenBee',
     'GorgeousSquid',
     'TangibleRabbit',
-    'Karen',
-    'Cathy',
-    'Farnsworth'
   ];
 
   // ═══════════════════════════════════════════════════════════════════
