@@ -137,18 +137,23 @@
       var model    = cells[2].textContent.trim();
       var timeText = cells[3].textContent.trim();
 
+      var lockout = row.textContent.toLowerCase().indexOf('lockout') !== -1 || row.textContent.toLowerCase().indexOf('loto') !== -1;
+
       // Ensure we are parsing a time block (looks for the en-dash or hyphen)
       var splitChar = timeText.indexOf('\u2013') !== -1 ? '\u2013' : '-';
       var parts    = timeText.split(splitChar).map(function(s){ return s.trim(); });
 
-      if (parts.length < 2) return;
-
-      var start = parseDT(parts[0]);
-      var end   = parseDT(parts[1].replace(/\n[\s\S]*/, '').trim());
+      var start = null, end = null;
+      if (parts.length >= 2) {
+        start = parseDT(parts[0]);
+        end   = parseDT(parts[1].replace(/\n[\s\S]*/, '').trim());
+      } else if (lockout && parts.length === 1) {
+        start = parseDT(parts[0].replace(/\n[\s\S]*/, '').trim());
+        if (start) end = new Date(start.getTime() + 100 * 24 * 3600 * 1000);
+      }
 
       if (!start || !end) return;
       model = findModel(model) || model || tool;   // same names as the saved tool list
-      var lockout = name.toLowerCase().indexOf('lockout') !== -1;
       out.push({ name: name, label: name.split(' ')[0], tool: tool, model: model, start: start, end: end, is_lockout: lockout });
     });
 
@@ -411,7 +416,7 @@
     }
     if (!start || !end) return null;
     var training = !!row.is_training;
-    var title    = row.title ? String(row.title).trim() : '';
+    var title    = String(row.title || row.description || row.name || '').trim();
     return {
       name:  title || (lockout ? 'Lockout' : (training ? 'Training' : 'Reserved')),
       label: title || (fmtH(start) + (lockout && !row.released_on && !row.end_time ? '' : '\u2013' + fmtH(end))),
