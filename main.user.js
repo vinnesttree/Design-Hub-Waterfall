@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Engineering Design Hub - Reservation Waterfall
 // @namespace    https://designhub-manager.unl.edu/
-// @version      1.0.2
-// @description  Dark-mode Gantt chart - ordered models, dynamic tool colors, hide idle printers
+// @version      1.1.0
+// @description  Dark-mode Gantt chart of printer reservations on the Agenda and Tools pages - ordered models, dynamic tool colors, hide idle printers, settings and minimize
 // @match        *://designhub-manager.unl.edu/admin/agenda/*
 // @match        *://designhub-manager.unl.edu/agenda/*
+// @match        *://designhub-manager.unl.edu/tools*
 // @match        */agenda/*
-// @grant        none
+// @grant        GM_registerMenuCommand
 // ==/UserScript==
 
 (function () {
@@ -16,7 +17,7 @@
   //  PRINTER LIST — edit this array to add/remove/reorder printers.
   //  Rows appear on the waterfall in exactly this order, top to bottom.
   //  Printers with no reservations today are hidden unless you click
-  //  "SHOW ALL MODELS".
+  //  "SHOW ALL RESERVATIONS".
   // ═══════════════════════════════════════════════════════════════════
   const MODELS = [
     'Ada',
@@ -41,6 +42,19 @@
   ];
 
   // ═══════════════════════════════════════════════════════════════════
+  //  TOOL ID → PRINTER NAME — the Tools page waterfall reads each tool's
+  //  ID (from its /tools/<id>/reserve/ link) and printer name (the
+  //  "Model" column) from the tool list on /tools/, so this is normally
+  //  empty. That list only shows tools you are authorized to use; add
+  //  any other printer here. Entries here win over the page.
+  //      123: 'Ada',
+  //      124: { model: 'Hull', tool: 'Prusa MK4' },
+  //  The IDs the page shows are listed in the waterfall settings.
+  // ═══════════════════════════════════════════════════════════════════
+  const TOOL_IDS = {
+  };
+
+  // ═══════════════════════════════════════════════════════════════════
   //  TOOL COLOR PALETTE — colors are assigned to tools in the order
   //  they are first encountered. Add more colors if needed.
   // ═══════════════════════════════════════════════════════════════════
@@ -48,6 +62,40 @@
     '#ff4444', '#3b9eff', '#22d47b', '#ff9f1c',
     '#c77dff', '#ff6b9d', '#00e5d4', '#ffdd00',
   ];
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  SETTINGS — saved in this site's localStorage. "Minimized" is kept
+  //  in sessionStorage only, so it resets when the tab is closed.
+  // ═══════════════════════════════════════════════════════════════════
+  var SETTINGS_KEY  = 'edh-wf-settings';
+  var MINIMIZED_KEY = 'edh-wf-minimized';
+  var DEFAULTS = { toolsPage: true, agendaPage: true, showIdle: false };
+
+  var settings = loadSettings();
+  var page     = null;   // 'tools' | 'agenda'
+  var mounted  = null;   // the chart currently on the page
+
+  function loadSettings() {
+    var saved = null;
+    try { saved = JSON.parse(localStorage.getItem(SETTINGS_KEY)); } catch (e) {}
+    var s = {};
+    Object.keys(DEFAULTS).forEach(function(k) {
+      s[k] = saved && typeof saved[k] === 'boolean' ? saved[k] : DEFAULTS[k];
+    });
+    return s;
+  }
+  function saveSettings() {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
+  }
+  function isMinimized() {
+    try { return sessionStorage.getItem(MINIMIZED_KEY) === '1'; } catch (e) { return false; }
+  }
+  function storeMinimized(v) {
+    try {
+      if (v) sessionStorage.setItem(MINIMIZED_KEY, '1');
+      else   sessionStorage.removeItem(MINIMIZED_KEY);
+    } catch (e) {}
+  }
 
   // ═══════════════════════════════════════════════════════════════════
   //  PARSE RESERVATIONS (Scoped to target table)
@@ -75,7 +123,7 @@
       var end   = parseDT(parts[1].replace(/\n[\s\S]*/, '').trim());
 
       if (!start || !end) return;
-      out.push({ name: name, tool: tool, model: model, start: start, end: end });
+      out.push({ name: name, label: name.split(' ')[0], tool: tool, model: model, start: start, end: end });
     });
 
     return out;
@@ -94,16 +142,121 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════
+  //  TOOLS PAGE — map tool IDs to printer names, then load each tool's
+  //  day from GET /tools/<id>/reservations.json (no login needed)
+  // ═══════════════════════════════════════════════════════════════════
+  function findModel(text) {
+    var lower = text.toLowerCase();
+    for (var i = 0; i < MODELS.length; i++) {
+      if (MODELS[i].toLowerCase() === lower) return MODELS[i];
+    }
+    for (var j = 0; j < MODELS.length; j++) {
+      var word = MODELS[j].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (new RegExp('\\b' + word + '\\b', 'i').test(text)) return MODELS[j];
+    }
+    return null;
+  }
+
+  function scrapeTools() {
+    var scope = document.querySelector('table[aria-describedby="tools-list-table"]') || document;
+    var byId = {}, list = [];
+
+    scope.querySelectorAll('a[href*="/tools/"]').forEach(function(a) {
+      var m   = (a.getAttribute('href') || '').match(/\/tools\/(\d+)\/reserve\b/);
+      var row = a.closest('tr');
+      if (!m || !row || byId[m[1]]) return;
+      var cells = row.querySelectorAll('td');
+      if (cells.length < 3) return;
+      var tool  = cells[1].textContent.trim();
+      var model = cells[2].textContent.trim();
+      byId[m[1]] = { id: m[1], tool: tool, model: findModel(model) || model || tool, manual: false };
+      list.push(byId[m[1]]);
+    });
+
+    Object.keys(TOOL_IDS).forEach(function(id) {
+      var v     = TOOL_IDS[id];
+      var model = typeof v === 'string' ? v : v && v.model;
+      if (!model) return;
+      var tool = (v && v.tool) || (byId[id] && byId[id].tool) || 'Other';
+      if (byId[id]) {
+        byId[id].model = model; byId[id].tool = tool; byId[id].manual = true;
+      } else {
+        byId[id] = { id: String(id), tool: tool, model: model, manual: true };
+        list.push(byId[id]);
+      }
+    });
+
+    return list;
+  }
+
+  // An unknown ID redirects to /tools/ (HTML), so res.json() throws and
+  // that tool is reported as not loaded.
+  function fetchReservations(id, day) {
+    var url = location.origin + '/tools/' + encodeURIComponent(id) + '/reservations.json' +
+              '?time=' + encodeURIComponent(ymd(day) + ' 12:00');
+    return fetch(url, { cache: 'no-store' })
+      .then(function(res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function(rows) {
+        if (!Array.isArray(rows)) throw new Error('unexpected response');
+        return rows;
+      });
+  }
+
+  // Rails sends ISO 8601 ("2026-10-27T14:00:00.000-05:00"); the fallback
+  // covers Ruby's "2026-10-27 14:00:00 -0500" / "... UTC" forms.
+  function parseTime(v) {
+    if (!v) return null;
+    var d = new Date(v);
+    if (isNaN(d)) {
+      var m = String(v).match(/^(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d(?::\d\d(?:\.\d+)?)?)\s*(UTC|Z|[+-]\d\d:?\d\d)?$/);
+      if (m) {
+        var tz = !m[3] ? '' : (m[3] === 'UTC' || m[3] === 'Z') ? 'Z' : m[3].replace(/^([+-]\d\d):?(\d\d)$/, '$1:$2');
+        d = new Date(m[1] + 'T' + m[2] + tz);
+      }
+    }
+    return isNaN(d) ? null : d;
+  }
+
+  // The JSON has no user names, so bars show the reservation title or its time span.
+  function toReservation(row, tool) {
+    var start = parseTime(row.start_time);
+    var end   = parseTime(row.end_time);
+    if (!start || !end) return null;
+    var training = !!row.is_training;
+    var title    = row.title ? String(row.title).trim() : '';
+    return {
+      name:  title || (training ? 'Training' : 'Reserved'),
+      label: title || (fmtH(start) + '\u2013' + fmtH(end)),
+      note:  training ? 'Training reservation' : '',
+      tool:  tool.tool,
+      model: tool.model,
+      start: start,
+      end:   end
+    };
+  }
+
+  function orderModels(models) {
+    return MODELS.filter(function(m){ return models.indexOf(m) !== -1; })
+      .concat(models.filter(function(m){ return MODELS.indexOf(m) === -1; }));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
   //  CHART BOUNDS
   // ═══════════════════════════════════════════════════════════════════
-  function getBounds() {
+  function agendaDay() {
     var h1 = document.querySelector('h1.dcf-txt-h3');
-    var base = new Date();
     if (h1) {
       var dateStr = h1.textContent.replace(/Today's Agenda/i, '').trim();
       var parsed = new Date(dateStr);
-      if (!isNaN(parsed)) base = parsed;
+      if (!isNaN(parsed)) return parsed;
     }
+    return new Date();
+  }
+
+  function dayBounds(base) {
     var CS = new Date(base.getFullYear(), base.getMonth(), base.getDate(), 0, 0, 0, 0);
     var CE = new Date(base.getFullYear(), base.getMonth(), base.getDate(), 23, 59, 59, 999);
     return { CS: CS, CE: CE, totalMs: CE - CS };
@@ -133,40 +286,29 @@
   function cl(v){ return Math.min(255,Math.max(0,Math.round(v))); }
 
   // ═══════════════════════════════════════════════════════════════════
-  //  BUILD CHART
+  //  STYLES
   // ═══════════════════════════════════════════════════════════════════
-  function buildChart(reservations) {
-    var bounds   = getBounds();
-    var CS       = bounds.CS, CE = bounds.CE, totalMs = bounds.totalMs;
-    var cm       = buildColorMap(reservations);
-    var colorMap = cm.map, tools = cm.tools;
-    var TICK     = 3 * 3600 * 1000;
-    var showingAll = false;
-
-    var activeSet = {};
-    reservations.forEach(function(r){
-      if (r.end > CS && r.start < CE) activeSet[r.model] = true;
-    });
-
-    var unknownModels = [];
-    reservations.forEach(function(r) {
-      if (MODELS.indexOf(r.model) === -1 && unknownModels.indexOf(r.model) === -1) {
-        unknownModels.push(r.model);
-      }
-    });
-
-    var allOrderedModels = MODELS.concat(unknownModels);
-
+  function ensureStyles() {
+    if (document.getElementById('edh-wf-style')) return;
     var styleEl = document.createElement('style');
+    styleEl.id = 'edh-wf-style';
     styleEl.textContent =
       '#edh-wf *{box-sizing:border-box}' +
       '#edh-wf{font-family:"Work Sans","Segoe UI",sans-serif;background:#080808;border:1px solid #1f1f1f;border-radius:8px;overflow:hidden;margin:2em 0 2.6em;box-shadow:0 0 0 1px #161616,0 12px 40px rgba(0,0,0,.85);color:#d8d8d8}' +
-      '#edh-wf-hdr{display:flex;align-items:center;justify-content:space-between;padding:.7em 1.25em;background:#0e0e0e;border-bottom:2px solid #ff4444}' +
+      '#edh-wf-hdr{display:flex;flex-wrap:wrap;gap:.5em;align-items:center;justify-content:space-between;padding:.7em 1.25em;background:#0e0e0e;border-bottom:2px solid #ff4444}' +
       '#edh-wf-hdr h2{margin:0;font-size:.82em;font-weight:700;text-transform:uppercase;letter-spacing:.13em;color:#fff}' +
       '#edh-wf-hdr h2 em{font-style:normal;color:#ff4444}' +
-      '#edh-wf-btn{background:#161616;border:1px solid #2e2e2e;color:#777;font-size:.7em;font-family:inherit;padding:.35em 1em;border-radius:4px;cursor:pointer;letter-spacing:.07em;transition:all .15s}' +
-      '#edh-wf-btn:hover{background:#222;color:#fff;border-color:#555}' +
+      '#edh-wf-hdr .edh-sub{margin-left:.8em;color:#777;font-weight:600;letter-spacing:.08em}' +
+      '#edh-wf-hdr .edh-hbtns{display:flex;align-items:center;gap:.4em}' +
+      '#edh-wf-btn,#edh-wf .edh-hbtn{background:#161616;border:1px solid #2e2e2e;color:#777;font-size:.7em;font-family:inherit;line-height:1.4;margin:0;padding:.35em 1em;border-radius:4px;cursor:pointer;letter-spacing:.07em;transition:all .15s}' +
+      '#edh-wf .edh-hbtn{min-width:2.4em;padding:.35em .6em;font-size:.8em;line-height:1.2}' +
+      '#edh-wf-btn:hover,#edh-wf .edh-hbtn:hover{background:#222;color:#fff;border-color:#555}' +
+      '#edh-wf.edh-min #edh-wf-btn,#edh-wf.edh-min #edh-wf-msg,#edh-wf.edh-min #edh-wf-leg,#edh-wf.edh-min #edh-wf-chart{display:none}' +
+      '#edh-wf-msg{padding:.5em 1.25em;background:#0b0b0b;border-bottom:1px solid #1a1a1a;font-size:.72em;color:#888}' +
+      '#edh-wf-msg:empty{display:none}' +
+      '#edh-wf-msg.err{color:#ff8a8a}' +
       '#edh-wf-leg{display:flex;flex-wrap:wrap;gap:.35em 1.6em;padding:.6em 1.25em;background:#0b0b0b;border-bottom:1px solid #1a1a1a;font-size:.73em;align-items:flex-start}' +
+      '#edh-wf-leg:empty{display:none}' +
       '.edh-leg-tool{display:flex;align-items:center;gap:.4em;color:#bbb;white-space:nowrap}' +
       '.edh-leg-sw{width:11px;height:11px;border-radius:2px;flex-shrink:0}' +
       '.edh-leg-extra{display:flex;align-items:center;gap:.4em;color:#999;white-space:nowrap;font-size:.92em;margin-left:.2em}' +
@@ -178,6 +320,7 @@
       '.edh-atick{position:absolute;transform:translateX(-50%);font-size:.63em;color:#fff;white-space:nowrap;padding-bottom:3px}' +
       '.edh-atick::after{content:"";display:block;width:1px;height:5px;background:#333;margin:0 auto}' +
       '.edh-sec{font-size:.63em;font-weight:700;text-transform:uppercase;letter-spacing:.11em;color:#333;padding:.45em 0 .2em var(--lw);border-top:1px solid #161616;margin-top:.25em}' +
+      '.edh-empty{font-size:.72em;color:#555;padding:.9em 0 .4em var(--lw)}' +
       '.edh-row{display:flex;align-items:flex-start;min-height:36px;border-bottom:1px solid #111;position:relative;transition:background .1s}' +
       '.edh-row:hover{background:#0d0d0d}' +
       '.edh-row:last-child{border-bottom:none}' +
@@ -192,19 +335,68 @@
       '#edh-tip .tn{font-weight:700;color:#fff;font-size:1.06em;margin-bottom:.1em}' +
       '#edh-tip .tt{font-weight:600;font-size:.92em}' +
       '#edh-tip .td{color:#cccccc;font-size:.88em}' +
-      '#edh-tip .tg{color:#22d47b;font-size:.88em}';
+      '#edh-tip .tg{color:#22d47b;font-size:.88em}' +
+      '#edh-tip .tx{color:#ffdd00;font-size:.88em}' +
+      '#edh-set-ov{position:fixed;inset:0;z-index:1000000;background:rgba(0,0,0,.65);display:flex;align-items:flex-start;justify-content:center;padding:6vh 16px;overflow-y:auto}' +
+      '#edh-set{width:100%;max-width:560px;font-family:"Work Sans","Segoe UI",sans-serif;font-size:16px;line-height:1.4;background:#080808;border:1px solid #1f1f1f;border-radius:8px;overflow:hidden;box-shadow:0 0 0 1px #161616,0 12px 40px rgba(0,0,0,.85);color:#d8d8d8;text-align:left}' +
+      '#edh-set *{box-sizing:border-box}' +
+      '#edh-set .edh-set-hdr{display:flex;align-items:center;justify-content:space-between;padding:.7em 1.25em;background:#0e0e0e;border-bottom:2px solid #ff4444}' +
+      '#edh-set h2{margin:0;font-family:inherit;font-size:.82em;font-weight:700;text-transform:uppercase;letter-spacing:.13em;color:#fff}' +
+      '#edh-set h2 em{font-style:normal;color:#ff4444}' +
+      '#edh-set .edh-hbtn{background:#161616;border:1px solid #2e2e2e;color:#999;font-size:.9em;font-family:inherit;line-height:1.2;margin:0;min-width:2.2em;padding:.25em .5em;border-radius:4px;cursor:pointer}' +
+      '#edh-set .edh-hbtn:hover{background:#222;color:#fff;border-color:#555}' +
+      '#edh-set .edh-set-body{padding:.4em 1.25em 1.25em;font-size:.85em}' +
+      '#edh-set h3{margin:1.2em 0 .3em;font-family:inherit;font-size:.78em;font-weight:700;text-transform:uppercase;letter-spacing:.11em;color:#777}' +
+      '#edh-set label.edh-set-opt{display:flex;gap:.75em;align-items:flex-start;margin:0;padding:.6em 0;border-bottom:1px solid #151515;color:#ddd;font-size:1em;font-weight:400;cursor:pointer}' +
+      '#edh-set label.edh-set-opt input{appearance:auto;-webkit-appearance:checkbox;position:static;opacity:1;width:16px;height:16px;flex-shrink:0;margin:.15em 0 0;accent-color:#ff4444;cursor:pointer}' +
+      '#edh-set label.edh-set-opt small{display:block;margin-top:.15em;color:#888;font-size:.85em}' +
+      '#edh-set p.edh-set-note{margin:.8em 0 0;color:#888;font-size:.85em;line-height:1.5}' +
+      '#edh-set code{font-family:Consolas,Menlo,monospace;color:#ccc;background:#141414;padding:0 .3em;border-radius:3px}' +
+      '#edh-set table.edh-set-ids{width:100%;margin:.4em 0 0;border-collapse:collapse;font-size:.9em;background:transparent}' +
+      '#edh-set table.edh-set-ids th,#edh-set table.edh-set-ids td{padding:.35em .5em;border:none;border-bottom:1px solid #151515;background:transparent;color:#ccc;text-align:left;vertical-align:top}' +
+      '#edh-set table.edh-set-ids th{color:#666;font-size:.8em;font-weight:700;text-transform:uppercase;letter-spacing:.08em}' +
+      '#edh-set table.edh-set-ids td.edh-id{font-family:Consolas,Menlo,monospace;color:#fff}' +
+      '#edh-set table.edh-set-ids small{color:#777}';
     document.head.appendChild(styleEl);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  BUILD CHART — returns { el, setData, setMessage, setShowAll,
+  //  isMinimized }. Rows are drawn once setData() supplies the
+  //  reservations and the printer rows to list, in order.
+  // ═══════════════════════════════════════════════════════════════════
+  function buildChart(opts) {
+    ensureStyles();
+    ensureTip();
+
+    var bounds   = dayBounds(opts.day);
+    var CS       = bounds.CS, CE = bounds.CE, totalMs = bounds.totalMs;
+    var TICK     = 3 * 3600 * 1000;
+    var showingAll = !!opts.showAll;
+    var minimized  = isMinimized();
+    var loaded     = false;
+
+    var reservations = [], models = [], activeSet = {}, colorMap = {};
 
     var wrap = document.createElement('div');
     wrap.id = 'edh-wf';
     wrap.innerHTML =
-      '<div id="edh-wf-hdr"><h2>\ud83d\udcc5 Reservation <em>Waterfall</em></h2><button id="edh-wf-btn">SHOW ALL RESERVATIONS</button></div>' +
+      '<div id="edh-wf-hdr"><h2>\ud83d\udcc5 Reservation <em>Waterfall</em>' +
+        (opts.subtitle ? '<span class="edh-sub">' + esc(opts.subtitle) + '</span>' : '') + '</h2>' +
+        '<div class="edh-hbtns">' +
+          '<button type="button" id="edh-wf-btn">' + (showingAll ? 'ACTIVE ONLY' : 'SHOW ALL RESERVATIONS') + '</button>' +
+          '<button type="button" class="edh-hbtn" data-act="settings" title="Waterfall settings" aria-label="Waterfall settings">\u2699</button>' +
+          '<button type="button" class="edh-hbtn" data-act="min"></button>' +
+        '</div></div>' +
+      '<div id="edh-wf-msg" role="status"></div>' +
       '<div id="edh-wf-leg"></div>' +
       '<div id="edh-wf-chart"><div id="edh-wf-inner"></div></div>';
 
-    renderLegend(wrap.querySelector('#edh-wf-leg'), tools, colorMap);
-
-    var inner = wrap.querySelector('#edh-wf-inner');
+    var inner  = wrap.querySelector('#edh-wf-inner');
+    var leg    = wrap.querySelector('#edh-wf-leg');
+    var msg    = wrap.querySelector('#edh-wf-msg');
+    var allBtn = wrap.querySelector('#edh-wf-btn');
+    var minBtn = wrap.querySelector('[data-act="min"]');
 
     var axis = document.createElement('div');
     axis.id = 'edh-wf-axis';
@@ -217,17 +409,41 @@
     }
     inner.appendChild(axis);
 
+    function setData(res, rowModels) {
+      reservations = res;
+      models       = rowModels;
+      loaded       = true;
+      activeSet    = {};
+      reservations.forEach(function(r){
+        if (r.end > CS && r.start < CE) activeSet[r.model] = true;
+      });
+      var cm = buildColorMap(reservations);
+      colorMap = cm.map;
+      renderLegend(leg, cm.tools, colorMap);
+      renderRows();
+    }
+
+    function setMessage(text, isError) {
+      msg.textContent = text || '';
+      msg.className   = isError ? 'err' : '';
+    }
+
     function renderRows() {
-      inner.querySelectorAll('.edh-row,.edh-sec').forEach(function(el){ el.remove(); });
-      var activeModels = allOrderedModels.filter(function(m){ return activeSet[m]; });
+      inner.querySelectorAll('.edh-row,.edh-sec,.edh-empty').forEach(function(el){ el.remove(); });
+      var activeModels = models.filter(function(m){ return activeSet[m]; });
       activeModels.forEach(function(m){ appendRow(m, true); });
 
       if (showingAll) {
-        var idleModels = allOrderedModels.filter(function(m){ return !activeSet[m]; });
+        var idleModels = models.filter(function(m){ return !activeSet[m]; });
         if (idleModels.length) {
           appendSec('\u25cb  No reservations today');
           idleModels.forEach(function(m){ appendRow(m, false); });
         }
+      } else if (loaded && !activeModels.length) {
+        var empty = document.createElement('div');
+        empty.className = 'edh-empty';
+        empty.textContent = 'No reservations today.';
+        inner.appendChild(empty);
       }
     }
 
@@ -293,7 +509,7 @@
         bar.style.top        = (lane * 26 + 4) + 'px';
         bar.style.background = grad(colorMap[r.tool] || PALETTE[0]);
 
-        var label = r.name.split(' ')[0];
+        var label = r.label;
         if (r.start < CS) label = '\u25c4 ' + label;
         if (r.end   > CE) label = label + ' \u25ba';
         bar.textContent = label;
@@ -313,19 +529,38 @@
       inner.appendChild(row);
     }
 
-    wrap.querySelector('#edh-wf-btn').addEventListener('click', function() {
-      showingAll = !showingAll;
-      this.textContent = showingAll ? 'ACTIVE ONLY' : 'SHOW ALL RESERVATIONS';
+    function setShowAll(v) {
+      showingAll = v;
+      allBtn.textContent = showingAll ? 'ACTIVE ONLY' : 'SHOW ALL RESERVATIONS';
       renderRows();
+    }
+
+    function applyMinimized() {
+      wrap.classList.toggle('edh-min', minimized);
+      minBtn.textContent = minimized ? '+' : '\u2212';
+      minBtn.title = minimized ? 'Expand the waterfall' : 'Minimize the waterfall until this tab is closed';
+      minBtn.setAttribute('aria-label', minBtn.title);
+      minBtn.setAttribute('aria-expanded', String(!minimized));
+    }
+
+    allBtn.addEventListener('click', function() { setShowAll(!showingAll); });
+    wrap.querySelector('[data-act="settings"]').addEventListener('click', openSettings);
+    minBtn.addEventListener('click', function() {
+      minimized = !minimized;
+      storeMinimized(minimized);
+      applyMinimized();
+      if (minimized) hideTip();
+      else if (opts.onExpand) opts.onExpand();
     });
+    applyMinimized();
 
-    renderRows();
-
-    var tip = document.createElement('div');
-    tip.id = 'edh-tip';
-    document.body.appendChild(tip);
-
-    return wrap;
+    return {
+      el: wrap,
+      setData: setData,
+      setMessage: setMessage,
+      setShowAll: setShowAll,
+      isMinimized: function() { return minimized; }
+    };
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -345,7 +580,7 @@
       }
       var d = document.createElement('div');
       d.className = 'edh-leg-tool';
-      d.innerHTML = '<span class="edh-leg-sw" style="background:' + colorMap[t] + '"></span>' + t;
+      d.innerHTML = '<span class="edh-leg-sw" style="background:' + colorMap[t] + '"></span>' + esc(t);
       legDiv.appendChild(d);
     });
 
@@ -362,7 +597,7 @@
         }
         var d = document.createElement('div');
         d.className = 'edh-leg-extra';
-        d.innerHTML = '<span class="edh-leg-sw" style="background:' + colorMap[t] + '"></span>' + t;
+        d.innerHTML = '<span class="edh-leg-sw" style="background:' + colorMap[t] + '"></span>' + esc(t);
         legDiv.appendChild(d);
       });
     }
@@ -371,15 +606,22 @@
   // ═══════════════════════════════════════════════════════════════════
   //  TOOLTIP
   // ═══════════════════════════════════════════════════════════════════
+  function ensureTip() {
+    if (document.getElementById('edh-tip')) return;
+    var tip = document.createElement('div');
+    tip.id = 'edh-tip';
+    document.body.appendChild(tip);
+  }
   function showTip(e, r, color) {
     var tip = document.getElementById('edh-tip');
     var dur = Math.round((r.end - r.start) / 60000);
     tip.innerHTML =
-      '<div class="tn">' + r.name + '</div>' +
-      '<div class="tt"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' + color + ';vertical-align:middle;margin-right:5px"></span>' + r.tool + '</div>' +
-      '<div>Model: <strong style="color:#fff">' + r.model + '</strong></div>' +
+      '<div class="tn">' + esc(r.name) + '</div>' +
+      '<div class="tt"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' + color + ';vertical-align:middle;margin-right:5px"></span>' + esc(r.tool) + '</div>' +
+      '<div>Model: <strong style="color:#fff">' + esc(r.model) + '</strong></div>' +
       '<div class="td">' + fmtDT(r.start) + ' \u2192 ' + fmtDT(r.end) + '</div>' +
-      '<div class="tg">\u23f1 ' + dur + ' min\u00a0(' + (dur/60).toFixed(1) + ' hr)</div>';
+      '<div class="tg">\u23f1 ' + dur + ' min\u00a0(' + (dur/60).toFixed(1) + ' hr)</div>' +
+      (r.note ? '<div class="tx">' + esc(r.note) + '</div>' : '');
     tip.style.display = 'block';
     moveTip(e);
   }
@@ -398,6 +640,88 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════
+  //  SETTINGS PAGE — opened from the ⚙ button on the chart or from the
+  //  Tampermonkey menu (the only way back in once the chart is off).
+  //  Changes save and apply immediately.
+  // ═══════════════════════════════════════════════════════════════════
+  function openSettings() {
+    ensureStyles();
+    closeSettings();
+
+    var ov = document.createElement('div');
+    ov.id = 'edh-set-ov';
+    ov.innerHTML =
+      '<div id="edh-set" role="dialog" aria-modal="true" aria-labelledby="edh-set-title">' +
+        '<div class="edh-set-hdr"><h2 id="edh-set-title">\u2699 Waterfall <em>Settings</em></h2>' +
+          '<button type="button" class="edh-hbtn" data-act="close" title="Close" aria-label="Close settings">\u00d7</button></div>' +
+        '<div class="edh-set-body">' +
+          '<h3>Show the waterfall on</h3>' +
+          optHtml('toolsPage', 'Tools page' + (page === 'tools' ? ' (this page)' : ''),
+                  'designhub-manager.unl.edu/tools/ \u2014 loads each printer\u2019s reservations.json (no login needed)') +
+          optHtml('agendaPage', 'Agenda page' + (page === 'agenda' ? ' (this page)' : ''),
+                  '/admin/agenda/ \u2014 built from the Today\u2019s Reservations table') +
+          '<h3>Chart</h3>' +
+          optHtml('showIdle', 'Show idle printers by default',
+                  'Start in SHOW ALL RESERVATIONS mode instead of active only') +
+          '<p class="edh-set-note">Changes are saved right away. To hide the chart just for now, use ' +
+            '<code>\u2212</code> on its header: it stays minimized until you close this tab. ' +
+            'While the waterfall is turned off, reopen these settings from the Tampermonkey menu ' +
+            '(\u2699 Waterfall settings).</p>' +
+          (page === 'tools' ? toolIdsHtml() : '') +
+        '</div>' +
+      '</div>';
+
+    ov.querySelectorAll('input[data-key]').forEach(function(input) {
+      input.addEventListener('change', function() {
+        var key = input.getAttribute('data-key');
+        settings[key] = input.checked;
+        saveSettings();
+        applySettings();
+        if (key === 'showIdle' && mounted) mounted.setShowAll(settings.showIdle);
+      });
+    });
+    ov.querySelector('[data-act="close"]').addEventListener('click', closeSettings);
+    ov.addEventListener('click', function(e) { if (e.target === ov) closeSettings(); });
+    document.addEventListener('keydown', onSettingsKey);
+
+    document.body.appendChild(ov);
+    ov.querySelector('input').focus();
+  }
+
+  function closeSettings() {
+    var ov = document.getElementById('edh-set-ov');
+    if (ov) ov.remove();
+    document.removeEventListener('keydown', onSettingsKey);
+  }
+  function onSettingsKey(e) {
+    if (e.key === 'Escape') closeSettings();
+  }
+
+  function optHtml(key, label, hint) {
+    return '<label class="edh-set-opt"><input type="checkbox" data-key="' + key + '"' + (settings[key] ? ' checked' : '') + '>' +
+           '<span>' + esc(label) + '<small>' + esc(hint) + '</small></span></label>';
+  }
+
+  function toolIdsHtml() {
+    var tools = scrapeTools();
+    var html = '<h3>Tool IDs \u2192 printer names</h3>';
+    if (!tools.length) {
+      return html + '<p class="edh-set-note">No reservable tools were found on this page.</p>';
+    }
+    html += '<table class="edh-set-ids"><thead><tr><th>Tool ID</th><th>Tool</th><th>Printer</th></tr></thead><tbody>';
+    tools.forEach(function(t) {
+      var notes = [];
+      if (t.manual) notes.push('from TOOL_IDS');
+      if (MODELS.indexOf(t.model) === -1) notes.push('not in MODELS');
+      html += '<tr><td class="edh-id">' + esc(t.id) + '</td><td>' + esc(t.tool) + '</td><td>' + esc(t.model) +
+              (notes.length ? ' <small>(' + notes.join(', ') + ')</small>' : '') + '</td></tr>';
+    });
+    return html + '</tbody></table>' +
+      '<p class="edh-set-note">Read from this page\u2019s tool list, which only shows tools you are authorized to use. ' +
+      'Add other printers to <code>TOOL_IDS</code> at the top of the script.</p>';
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
   //  FORMAT HELPERS
   // ═══════════════════════════════════════════════════════════════════
   function fmtH(d) {
@@ -409,11 +733,26 @@
     var mo = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     return mo[d.getMonth()] + ' ' + d.getDate() + ' ' + fmtH(d);
   }
+  function fmtDay(d) {
+    var dn = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    var mo = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return dn[d.getDay()] + ' ' + mo[d.getMonth()] + ' ' + d.getDate();
+  }
+  function ymd(d) {
+    var m = d.getMonth() + 1, day = d.getDate();
+    return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function(c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
 
   // ═══════════════════════════════════════════════════════════════════
-  //  INIT (Hardened to specifically grab the 'Today's Reservations' table)
+  //  MOUNT — Agenda page (Hardened to specifically grab the
+  //  'Today's Reservations' table)
   // ═══════════════════════════════════════════════════════════════════
-  function init() {
+  function mountAgenda() {
     // 1. Find the header specifically labeled "Today's Reservations"
     var resHeader = document.getElementById('todays-reservations');
     var table = null;
@@ -430,7 +769,7 @@
 
     if (!table) {
       console.warn("EDH Waterfall Error: Could not find the reservations table on this page.");
-      return;
+      return null;
     }
 
     // 3. Parse and build
@@ -440,10 +779,108 @@
       // We don't return here so it can still draw an empty grid showing "No reservations today"
     }
 
-    var chart = buildChart(reservations);
-    if (!chart) return;
+    var unknownModels = [];
+    reservations.forEach(function(r) {
+      if (MODELS.indexOf(r.model) === -1 && unknownModels.indexOf(r.model) === -1) {
+        unknownModels.push(r.model);
+      }
+    });
 
-    table.parentNode.insertBefore(chart, table);
+    var chart = buildChart({ day: agendaDay(), showAll: settings.showIdle });
+    chart.setData(reservations, MODELS.concat(unknownModels));
+    table.parentNode.insertBefore(chart.el, table);
+    return chart;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  MOUNT — Tools page. Only printers found on the page (or in
+  //  TOOL_IDS) get rows, so "idle" never means "not checked". While
+  //  minimized, nothing is fetched until the chart is expanded.
+  // ═══════════════════════════════════════════════════════════════════
+  function mountTools() {
+    var anchor = document.getElementById('tools-list-table') ||
+                 document.querySelector('table.dcf-table');
+    if (!anchor) {
+      console.warn("EDH Waterfall Error: Could not find the tool list on this page.");
+      return null;
+    }
+
+    var day     = new Date();
+    var tools   = scrapeTools();
+    var started = false;
+    var chart   = buildChart({
+      day: day,
+      subtitle: fmtDay(day),
+      showAll: settings.showIdle,
+      onExpand: load
+    });
+    anchor.parentNode.insertBefore(chart.el, anchor);
+
+    function load() {
+      if (started) return;
+      started = true;
+
+      if (!tools.length) {
+        chart.setMessage('No reservable tools were found on this page.');
+        chart.setData([], []);
+        return;
+      }
+
+      chart.setMessage('Loading reservations for ' + tools.length + ' tools\u2026');
+      Promise.all(tools.map(function(t) {
+        return fetchReservations(t.id, day).then(
+          function(rows) { return { tool: t, rows: rows }; },
+          function(err)  {
+            console.warn('EDH Waterfall: could not load /tools/' + t.id + '/reservations.json (' + t.model + ')', err);
+            return { tool: t, error: true };
+          });
+      })).then(function(results) {
+        var reservations = [], models = [], failed = [];
+        results.forEach(function(r) {
+          if (r.error) { failed.push(r.tool.model); return; }
+          if (models.indexOf(r.tool.model) === -1) models.push(r.tool.model);
+          r.rows.forEach(function(row) {
+            var res = toReservation(row, r.tool);
+            if (res) reservations.push(res);
+          });
+        });
+        chart.setData(reservations, orderModels(models));
+        if (failed.length) chart.setMessage('Could not load reservations for ' + failed.join(', ') + '.', true);
+        else               chart.setMessage('');
+      });
+    }
+
+    if (!chart.isMinimized()) load();
+    return chart;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  INIT
+  // ═══════════════════════════════════════════════════════════════════
+  function detectPage() {
+    if (/^\/tools\/?$/.test(location.pathname)) return 'tools';
+    if (/\/agenda(\/|$)/.test(location.pathname)) return 'agenda';
+    return null;
+  }
+
+  function applySettings() {
+    var enabled = page === 'tools' ? settings.toolsPage : settings.agendaPage;
+    if (enabled && !mounted) {
+      mounted = page === 'tools' ? mountTools() : mountAgenda();
+    } else if (!enabled && mounted) {
+      mounted.el.remove();
+      mounted = null;
+      hideTip();
+    }
+  }
+
+  function init() {
+    page = detectPage();
+    if (!page) return;
+    if (typeof GM_registerMenuCommand === 'function') {
+      GM_registerMenuCommand('\u2699 Waterfall settings', openSettings);
+    }
+    applySettings();
   }
 
   if (document.readyState === 'loading') {
