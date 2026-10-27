@@ -402,20 +402,25 @@
 
   // The JSON has no user names, so bars show the reservation title or its time span.
   function toReservation(row, tool) {
-    var start = parseTime(row.start_time);
-    var end   = parseTime(row.end_time);
+    var start = parseTime(row.start_time || row.started_on);
+    var end   = parseTime(row.end_time || row.released_on);
+    var lockout  = !!row.is_lockout || !!row.started_on || row.name === 'Lockout';
+    if (!start) return null;
+    if (lockout && !end) {
+      end = new Date(start.getTime() + 100 * 24 * 3600 * 1000);
+    }
     if (!start || !end) return null;
-    var lockout  = !!row.is_lockout || row.name === 'Lockout';
     var training = !!row.is_training;
     var title    = row.title ? String(row.title).trim() : '';
     return {
       name:  title || (lockout ? 'Lockout' : (training ? 'Training' : 'Reserved')),
-      label: title || (fmtH(start) + '\u2013' + fmtH(end)),
+      label: title || (fmtH(start) + (lockout && !row.released_on && !row.end_time ? '' : '\u2013' + fmtH(end))),
       note:  lockout ? 'Tool lockout' : (training ? 'Training reservation' : ''),
       tool:  tool.tool,
       model: tool.model,
       start: start,
-      end:   end
+      end:   end,
+      is_lockout: lockout
     };
   }
 
@@ -694,7 +699,12 @@
         bar.style.left       = left + '%';
         bar.style.width      = width + '%';
         bar.style.top        = (lane * 26 + 4) + 'px';
-        bar.style.background = grad(colorMap[r.tool] || PALETTE[0]);
+        if (r.is_lockout) {
+          bar.style.background = 'repeating-linear-gradient(45deg, #aa2222, #aa2222 10px, #cc2222 10px, #cc2222 20px)';
+          bar.style.color = '#fff';
+        } else {
+          bar.style.background = grad(colorMap[r.tool] || PALETTE[0]);
+        }
 
         var label = r.label;
         if (r.start < CS) label = '\u25c4 ' + label;
