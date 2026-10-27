@@ -287,6 +287,52 @@
       });
   }
 
+  function fetchStatusLockouts() {
+    return fetch(location.origin + '/status_page/', { cache: 'no-store' })
+      .then(function(res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.text();
+      })
+      .then(function(html) {
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        var lockouts = [];
+        doc.querySelectorAll('table').forEach(function(table) {
+          var prev = table.previousElementSibling;
+          if (!prev || !prev.textContent || prev.textContent.toLowerCase().indexOf('lockout') === -1) return;
+          var rows = table.querySelectorAll('tbody tr');
+          rows.forEach(function(row) {
+            var cells = row.querySelectorAll('td');
+            if (cells.length < 4) return;
+            var model = cells[0].textContent.trim();
+            var desc  = cells[1].textContent.trim();
+            var startStr = cells[2].textContent.trim();
+            var endStr   = cells[3].textContent.trim();
+            var start = parseTime(startStr);
+            var end   = parseTime(endStr);
+            if (!start) return;
+            if (!end) end = new Date(start.getTime() + 100 * 24 * 3600 * 1000);
+
+            model = findModel(model) || model;
+            lockouts.push({
+              name: 'Lockout',
+              label: 'Lockout' + (desc ? ': ' + desc : ''),
+              tool: model,
+              model: model,
+              start: start,
+              end: end,
+              is_lockout: true,
+              note: desc || 'Tool lockout'
+            });
+          });
+        });
+        return lockouts;
+      })
+      .catch(function(err) {
+        console.warn("EDH Waterfall: could not fetch lockouts from /status_page/", err);
+        return [];
+      });
+  }
+
   // Checks saved tools whose flag is missing or over a day old, four edit
   // pages at a time. Resolves true if any flag changed.
   var RECHECK_MS = 24 * 3600 * 1000;
@@ -1012,6 +1058,15 @@
     chart.setData(reservations, rows());
     table.parentNode.insertBefore(chart.el, table);
 
+    var hasStatusLockouts = false;
+    fetchStatusLockouts().then(function(lockouts) {
+      if (lockouts.length) {
+        hasStatusLockouts = true;
+        reservations = reservations.concat(lockouts);
+        chart.setData(reservations, rows());
+      }
+    });
+
     refreshToolsFromAdmin()
       .then(function(changed) {
         if (changed) chart.setData(reservations, rows());
@@ -1061,15 +1116,26 @@
       }
 
       chart.setMessage('Loading reservations for ' + tools.length + ' tools\u2026');
-      Promise.all(tools.map(function(t) {
+
+      var fetchStatus = fetchStatusLockouts();
+      var fetchAllTools = Promise.all(tools.map(function(t) {
         return fetchReservations(t.id, day).then(
           function(rows) { return { tool: t, rows: rows }; },
           function(err)  {
             console.warn('EDH Waterfall: could not load /tools/' + t.id + '/reservations.json (' + t.model + ')', err);
             return { tool: t, error: err || true };
           });
-      })).then(function(results) {
+      }));
+
+      Promise.all([fetchStatus, fetchAllTools]).then(function(resArray) {
+        var statusLockouts = resArray[0];
+        var results = resArray[1];
         var reservations = [], models = [], failed = [], missing = [];
+
+        statusLockouts.forEach(function(lockout) {
+          reservations.push(lockout);
+        });
+
         results.forEach(function(r) {
           if (r.error) {
             (r.error.missing && !r.tool.manual ? missing : failed).push(r.tool);
