@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Engineering Design Hub - Reservation Waterfall
 // @namespace    https://designhub-manager.unl.edu/
-// @version      1.1.0
+// @version      1.2.0
 // @description  Dark-mode Gantt chart of printer reservations on the Agenda and Tools pages - ordered models, dynamic tool colors, hide idle printers, settings and minimize
 // @match        *://designhub-manager.unl.edu/admin/agenda/*
 // @match        *://designhub-manager.unl.edu/agenda/*
 // @match        *://designhub-manager.unl.edu/tools*
+// @match        *://designhub-manager.unl.edu/admin/tools*
 // @match        */agenda/*
 // @grant        GM_registerMenuCommand
 // ==/UserScript==
@@ -42,14 +43,14 @@
   ];
 
   // ═══════════════════════════════════════════════════════════════════
-  //  TOOL ID → PRINTER NAME — the Tools page waterfall reads each tool's
-  //  ID (from its /tools/<id>/reserve/ link) and printer name (the
-  //  "Model" column) from the tool list on /tools/, so this is normally
-  //  empty. That list only shows tools you are authorized to use; add
-  //  any other printer here. Entries here win over the page.
+  //  TOOL ID → PRINTER NAME — the script saves each tool's ID and
+  //  printer name (the "Model" column) whenever you open the Tools page
+  //  (/tools/) or the admin Tools page (/admin/tools/, which lists every
+  //  tool), so this is normally empty. Add a printer here only if
+  //  neither page shows it to you. Entries here win over saved ones.
   //      123: 'Ada',
   //      124: { model: 'Hull', tool: 'Prusa MK4' },
-  //  The IDs the page shows are listed in the waterfall settings.
+  //  The saved tools are listed in the waterfall settings.
   // ═══════════════════════════════════════════════════════════════════
   const TOOL_IDS = {
   };
@@ -64,15 +65,17 @@
   ];
 
   // ═══════════════════════════════════════════════════════════════════
-  //  SETTINGS — saved in this site's localStorage. "Minimized" is kept
-  //  in sessionStorage only, so it resets when the tab is closed.
+  //  SETTINGS — saved in this site's localStorage, along with the tools
+  //  found so far. "Minimized" is kept in sessionStorage only, so it
+  //  resets when the tab is closed.
   // ═══════════════════════════════════════════════════════════════════
   var SETTINGS_KEY  = 'edh-wf-settings';
+  var TOOLS_KEY     = 'edh-wf-tools';
   var MINIMIZED_KEY = 'edh-wf-minimized';
   var DEFAULTS = { toolsPage: true, agendaPage: true, showIdle: false };
 
   var settings = loadSettings();
-  var page     = null;   // 'tools' | 'agenda'
+  var page     = null;   // 'tools' | 'admintools' | 'agenda'
   var mounted  = null;   // the chart currently on the page
 
   function loadSettings() {
@@ -86,6 +89,23 @@
   }
   function saveSettings() {
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
+  }
+  // { "<tool id>": { tool: 'Prusa MK4', model: 'Ada' }, ... }
+  function loadSavedTools() {
+    var saved = null, out = {};
+    try { saved = JSON.parse(localStorage.getItem(TOOLS_KEY)); } catch (e) {}
+    if (saved && typeof saved === 'object') {
+      Object.keys(saved).forEach(function(id) {
+        var t = saved[id];
+        if (/^\d+$/.test(id) && t && typeof t.model === 'string') {
+          out[id] = { tool: String(t.tool || 'Other'), model: t.model };
+        }
+      });
+    }
+    return out;
+  }
+  function saveSavedTools(saved) {
+    try { localStorage.setItem(TOOLS_KEY, JSON.stringify(saved)); } catch (e) {}
   }
   function isMinimized() {
     try { return sessionStorage.getItem(MINIMIZED_KEY) === '1'; } catch (e) { return false; }
@@ -145,6 +165,14 @@
   //  TOOLS PAGE — map tool IDs to printer names, then load each tool's
   //  day from GET /tools/<id>/reservations.json (no login needed)
   // ═══════════════════════════════════════════════════════════════════
+  // /tools/ links each tool to /tools/<id>/reserve/ and /admin/tools/ to
+  // /admin/tools/<id>/edit/ (checkable tools use /edit_checkable/ and are
+  // skipped); both tables have the Model in the third column.
+  var TOOL_LINKS = {
+    tools:      /\/tools\/(\d+)\/reserve\/?(?:[?#]|$)/,
+    admintools: /\/admin\/tools\/(\d+)\/edit\/?(?:[?#]|$)/
+  };
+
   function findModel(text) {
     var lower = text.toLowerCase();
     for (var i = 0; i < MODELS.length; i++) {
@@ -157,20 +185,49 @@
     return null;
   }
 
-  function scrapeTools() {
-    var scope = document.querySelector('table[aria-describedby="tools-list-table"]') || document;
-    var byId = {}, list = [];
+  function scrapePageTools() {
+    var re = TOOL_LINKS[page], found = [], seen = {};
+    if (!re) return found;
 
-    scope.querySelectorAll('a[href*="/tools/"]').forEach(function(a) {
-      var m   = (a.getAttribute('href') || '').match(/\/tools\/(\d+)\/reserve\b/);
+    document.querySelectorAll('a[href]').forEach(function(a) {
+      var m   = a.getAttribute('href').match(re);
       var row = a.closest('tr');
-      if (!m || !row || byId[m[1]]) return;
+      if (!m || !row || seen[m[1]]) return;
       var cells = row.querySelectorAll('td');
       if (cells.length < 3) return;
       var tool  = cells[1].textContent.trim();
       var model = cells[2].textContent.trim();
-      byId[m[1]] = { id: m[1], tool: tool, model: findModel(model) || model || tool, manual: false };
-      list.push(byId[m[1]]);
+      seen[m[1]] = true;
+      found.push({ id: m[1], tool: tool, model: findModel(model) || model || tool });
+    });
+
+    return found;
+  }
+
+  // /admin/tools/ lists every tool, so it replaces the saved list. /tools/
+  // only lists tools you are authorized to use, so it adds to it.
+  function rememberPageTools() {
+    var found = scrapePageTools();
+    if (!found.length) return;
+    var saved = page === 'admintools' ? {} : loadSavedTools();
+    found.forEach(function(t) { saved[t.id] = { tool: t.tool, model: t.model }; });
+    saveSavedTools(saved);
+  }
+
+  function forgetTools(tools) {
+    var saved = loadSavedTools();
+    tools.forEach(function(t) { delete saved[t.id]; });
+    saveSavedTools(saved);
+  }
+
+  // Saved tools plus TOOL_IDS: [{ id, tool, model, manual }]
+  function knownTools() {
+    var saved = loadSavedTools();
+    var byId = {}, list = [];
+
+    Object.keys(saved).forEach(function(id) {
+      byId[id] = { id: id, tool: saved[id].tool, model: saved[id].model, manual: false };
+      list.push(byId[id]);
     });
 
     Object.keys(TOOL_IDS).forEach(function(id) {
@@ -189,13 +246,18 @@
     return list;
   }
 
-  // An unknown ID redirects to /tools/ (HTML), so res.json() throws and
-  // that tool is reported as not loaded.
+  // An unknown ID redirects to /tools/ ("That tool does not exist"); that
+  // error is marked .missing so the tool can be dropped from the saved list.
   function fetchReservations(id, day) {
     var url = location.origin + '/tools/' + encodeURIComponent(id) + '/reservations.json' +
               '?time=' + encodeURIComponent(ymd(day) + ' 12:00');
     return fetch(url, { cache: 'no-store' })
       .then(function(res) {
+        if (res.redirected && /^\/tools\/?$/.test(new URL(res.url).pathname)) {
+          var err = new Error('tool ' + id + ' does not exist');
+          err.missing = true;
+          throw err;
+        }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return res.json();
       })
@@ -356,7 +418,9 @@
       '#edh-set table.edh-set-ids th,#edh-set table.edh-set-ids td{padding:.35em .5em;border:none;border-bottom:1px solid #151515;background:transparent;color:#ccc;text-align:left;vertical-align:top}' +
       '#edh-set table.edh-set-ids th{color:#666;font-size:.8em;font-weight:700;text-transform:uppercase;letter-spacing:.08em}' +
       '#edh-set table.edh-set-ids td.edh-id{font-family:Consolas,Menlo,monospace;color:#fff}' +
-      '#edh-set table.edh-set-ids small{color:#777}';
+      '#edh-set table.edh-set-ids small{color:#777}' +
+      '#edh-set .edh-set-btn{margin:.9em 0 0;background:#161616;border:1px solid #2e2e2e;color:#999;font-size:.8em;font-family:inherit;line-height:1.4;padding:.4em 1em;border-radius:4px;cursor:pointer;letter-spacing:.05em}' +
+      '#edh-set .edh-set-btn:hover{background:#222;color:#fff;border-color:#555}';
     document.head.appendChild(styleEl);
   }
 
@@ -657,7 +721,7 @@
         '<div class="edh-set-body">' +
           '<h3>Show the waterfall on</h3>' +
           optHtml('toolsPage', 'Tools page' + (page === 'tools' ? ' (this page)' : ''),
-                  'designhub-manager.unl.edu/tools/ \u2014 loads each printer\u2019s reservations.json (no login needed)') +
+                  'designhub-manager.unl.edu/tools/ \u2014 loads each saved tool\u2019s reservations.json (no login needed)') +
           optHtml('agendaPage', 'Agenda page' + (page === 'agenda' ? ' (this page)' : ''),
                   '/admin/agenda/ \u2014 built from the Today\u2019s Reservations table') +
           '<h3>Chart</h3>' +
@@ -667,7 +731,7 @@
             '<code>\u2212</code> on its header: it stays minimized until you close this tab. ' +
             'While the waterfall is turned off, reopen these settings from the Tampermonkey menu ' +
             '(\u2699 Waterfall settings).</p>' +
-          (page === 'tools' ? toolIdsHtml() : '') +
+          '<div id="edh-set-tools">' + savedToolsHtml() + '</div>' +
         '</div>' +
       '</div>';
 
@@ -681,7 +745,13 @@
       });
     });
     ov.querySelector('[data-act="close"]').addEventListener('click', closeSettings);
-    ov.addEventListener('click', function(e) { if (e.target === ov) closeSettings(); });
+    ov.addEventListener('click', function(e) {
+      if (e.target === ov) closeSettings();
+      if (e.target.closest('[data-act="forget"]')) {
+        saveSavedTools({});
+        ov.querySelector('#edh-set-tools').innerHTML = savedToolsHtml();
+      }
+    });
     document.addEventListener('keydown', onSettingsKey);
 
     document.body.appendChild(ov);
@@ -702,23 +772,26 @@
            '<span>' + esc(label) + '<small>' + esc(hint) + '</small></span></label>';
   }
 
-  function toolIdsHtml() {
-    var tools = scrapeTools();
-    var html = '<h3>Tool IDs \u2192 printer names</h3>';
+  function savedToolsHtml() {
+    var tools = knownTools();
+    var html = '<h3>Saved tools (tool ID \u2192 printer)</h3>';
     if (!tools.length) {
-      return html + '<p class="edh-set-note">No reservable tools were found on this page.</p>';
+      html += '<p class="edh-set-note">No tools saved yet.</p>';
+    } else {
+      html += '<table class="edh-set-ids"><thead><tr><th>Tool ID</th><th>Tool</th><th>Printer</th></tr></thead><tbody>';
+      tools.forEach(function(t) {
+        html += '<tr><td class="edh-id">' + esc(t.id) + '</td><td>' + esc(t.tool) + '</td><td>' + esc(t.model) +
+                (t.manual ? ' <small>(from TOOL_IDS)</small>' : '') + '</td></tr>';
+      });
+      html += '</tbody></table>';
     }
-    html += '<table class="edh-set-ids"><thead><tr><th>Tool ID</th><th>Tool</th><th>Printer</th></tr></thead><tbody>';
-    tools.forEach(function(t) {
-      var notes = [];
-      if (t.manual) notes.push('from TOOL_IDS');
-      if (MODELS.indexOf(t.model) === -1) notes.push('not in MODELS');
-      html += '<tr><td class="edh-id">' + esc(t.id) + '</td><td>' + esc(t.tool) + '</td><td>' + esc(t.model) +
-              (notes.length ? ' <small>(' + notes.join(', ') + ')</small>' : '') + '</td></tr>';
-    });
-    return html + '</tbody></table>' +
-      '<p class="edh-set-note">Read from this page\u2019s tool list, which only shows tools you are authorized to use. ' +
-      'Add other printers to <code>TOOL_IDS</code> at the top of the script.</p>';
+    html += '<p class="edh-set-note">Tools are saved whenever you open the Tools page or the admin Tools page ' +
+      '(/admin/tools/). The admin page lists every tool, so opening it replaces this list. The Tools page only ' +
+      'lists tools you are authorized to use, so it adds to the list. The Tools page waterfall loads every tool here.</p>';
+    if (Object.keys(loadSavedTools()).length) {
+      html += '<button type="button" class="edh-set-btn" data-act="forget">Forget saved tools</button>';
+    }
+    return html;
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -793,9 +866,9 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  //  MOUNT — Tools page. Only printers found on the page (or in
-  //  TOOL_IDS) get rows, so "idle" never means "not checked". While
-  //  minimized, nothing is fetched until the chart is expanded.
+  //  MOUNT — Tools page. Only saved tools (and TOOL_IDS) that loaded
+  //  get rows, so "idle" never means "not checked". While minimized,
+  //  nothing is fetched until the chart is expanded.
   // ═══════════════════════════════════════════════════════════════════
   function mountTools() {
     var anchor = document.getElementById('tools-list-table') ||
@@ -806,7 +879,6 @@
     }
 
     var day     = new Date();
-    var tools   = scrapeTools();
     var started = false;
     var chart   = buildChart({
       day: day,
@@ -820,8 +892,9 @@
       if (started) return;
       started = true;
 
+      var tools = knownTools();
       if (!tools.length) {
-        chart.setMessage('No reservable tools were found on this page.');
+        chart.setMessage('No tools found on this page or saved yet.');
         chart.setData([], []);
         return;
       }
@@ -832,21 +905,38 @@
           function(rows) { return { tool: t, rows: rows }; },
           function(err)  {
             console.warn('EDH Waterfall: could not load /tools/' + t.id + '/reservations.json (' + t.model + ')', err);
-            return { tool: t, error: true };
+            return { tool: t, error: err || true };
           });
       })).then(function(results) {
-        var reservations = [], models = [], failed = [];
+        var reservations = [], models = [], failed = [], missing = [];
         results.forEach(function(r) {
-          if (r.error) { failed.push(r.tool.model); return; }
+          if (r.error) {
+            (r.error.missing && !r.tool.manual ? missing : failed).push(r.tool);
+            return;
+          }
           if (models.indexOf(r.tool.model) === -1) models.push(r.tool.model);
           r.rows.forEach(function(row) {
             var res = toReservation(row, r.tool);
             if (res) reservations.push(res);
           });
         });
+
+        // Forget saved tools the site says no longer exist, unless no tool
+        // loaded at all (then the problem is probably not the tools).
+        if (missing.length && failed.length + missing.length < results.length) {
+          forgetTools(missing);
+        } else {
+          failed = failed.concat(missing);
+          missing = [];
+        }
+
+        var names = function(list) { return list.map(function(t) { return t.model; }).join(', '); };
+        var text = [];
+        if (failed.length)  text.push('Could not load reservations for ' + names(failed) + '.');
+        if (missing.length) text.push('Removed ' + names(missing) + ' from the saved tools: the site no longer has ' +
+                                      (missing.length === 1 ? 'that tool.' : 'those tools.'));
         chart.setData(reservations, orderModels(models));
-        if (failed.length) chart.setMessage('Could not load reservations for ' + failed.join(', ') + '.', true);
-        else               chart.setMessage('');
+        chart.setMessage(text.join(' '), failed.length > 0);
       });
     }
 
@@ -859,12 +949,15 @@
   // ═══════════════════════════════════════════════════════════════════
   function detectPage() {
     if (/^\/tools\/?$/.test(location.pathname)) return 'tools';
+    if (/^\/admin\/tools\/?$/.test(location.pathname)) return 'admintools';
     if (/\/agenda(\/|$)/.test(location.pathname)) return 'agenda';
     return null;
   }
 
+  // The admin Tools page only feeds the saved tool list; it has no chart.
   function applySettings() {
-    var enabled = page === 'tools' ? settings.toolsPage : settings.agendaPage;
+    var enabled = page === 'tools'  ? settings.toolsPage :
+                  page === 'agenda' ? settings.agendaPage : false;
     if (enabled && !mounted) {
       mounted = page === 'tools' ? mountTools() : mountAgenda();
     } else if (!enabled && mounted) {
@@ -877,6 +970,7 @@
   function init() {
     page = detectPage();
     if (!page) return;
+    rememberPageTools();
     if (typeof GM_registerMenuCommand === 'function') {
       GM_registerMenuCommand('\u2699 Waterfall settings', openSettings);
     }
