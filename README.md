@@ -4,7 +4,7 @@ This was developed with the help of generative AI
 
 ## Where the waterfall shows up
 
-- **Admin agenda** (`/admin/agenda/`): built from the Today's Reservations table.
+- **Admin agenda** (`/admin/agenda/`): built from the Today's Reservations table. SHOW ALL RESERVATIONS lists every printer in `MODELS` plus every saved tool. The agenda reads `/admin/tools/` in the background to keep the saved list current. That needs the Manage Resources permission; without it, the agenda uses whatever is already saved.
 - **Tools page** (`https://designhub-manager.unl.edu/tools/`): built from `GET /tools/<id>/reservations.json`, which works without logging in. It loads every saved tool (see below). The JSON doesn't include user names, so bars show the reservation's time span (or its title, if it has one).
 
 ## Saved tools
@@ -12,7 +12,7 @@ This was developed with the help of generative AI
 The script saves each tool's ID and printer name (the Model column) in the browser whenever you open:
 
 - **the Tools page** (`/tools/`). It only lists tools you are authorized to use, so it adds to the saved list.
-- **the admin Tools page** (`/admin/tools/`). It lists every tool, so it replaces the saved list. Checkable tools are skipped.
+- **the admin Tools page** (`/admin/tools/`), either directly or in the background from the Agenda page. It lists every tool, so it replaces the saved list. Checkable tools are skipped.
 
 If the site says a saved tool no longer exists, that tool is dropped from the list. The settings page shows the saved list and has a **Forget saved tools** button. To add a printer that neither page shows you, put it in `TOOL_IDS` at the top of the script.
 
