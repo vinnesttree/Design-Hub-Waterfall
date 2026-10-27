@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Engineering Design Hub - Reservation Waterfall
 // @namespace    https://designhub-manager.unl.edu/
-// @version      1.2.1
+// @version      1.2.2
 // @description  Dark-mode Gantt chart of printer reservations on the Agenda and Tools pages - ordered models, dynamic tool colors, hide idle printers, settings and minimize
 // @match        *://designhub-manager.unl.edu/admin/agenda/*
 // @match        *://designhub-manager.unl.edu/agenda/*
@@ -91,7 +91,8 @@
   function saveSettings() {
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
   }
-  // { "<tool id>": { tool: 'Prusa MK4', model: 'Ada' }, ... }
+  // { "<tool id>": { tool: 'Prusa MK4', model: 'Ada', reservable: true,
+  //                  checked: <ms timestamp of the reservable check> }, ... }
   function loadSavedTools() {
     var saved = null, out = {};
     try { saved = JSON.parse(localStorage.getItem(TOOLS_KEY)); } catch (e) {}
@@ -100,6 +101,8 @@
         var t = saved[id];
         if (/^\d+$/.test(id) && t && typeof t.model === 'string') {
           out[id] = { tool: String(t.tool || 'Other'), model: t.model };
+          if (typeof t.reservable === 'boolean') out[id].reservable = t.reservable;
+          if (typeof t.checked === 'number')     out[id].checked    = t.checked;
         }
       });
     }
@@ -208,21 +211,41 @@
     return found;
   }
 
+  // Tool name, printer name and reservable flag, for "did anything shown change?"
+  function toolsKey(saved) {
+    return JSON.stringify(Object.keys(saved).map(function(id) {
+      return [id, saved[id].tool, saved[id].model, saved[id].reservable];
+    }));
+  }
+
+  // /tools/ only links tools that take reservations, so its tools are saved
+  // as reservable. /admin/tools/ lists every tool without saying, so its
+  // tools keep the flag they had (checked later by verifyReservable).
   // Returns true if the saved list changed.
-  function saveFoundTools(found, replace) {
+  function saveFoundTools(found, replace, reservable) {
     if (!found.length) return false;
     var before = loadSavedTools();
     var saved  = replace ? {} : loadSavedTools();
-    found.forEach(function(t) { saved[t.id] = { tool: t.tool, model: t.model }; });
+    found.forEach(function(t) {
+      var old = before[t.id] || {};
+      saved[t.id] = { tool: t.tool, model: t.model };
+      if (reservable) {
+        saved[t.id].reservable = true;
+        saved[t.id].checked    = Date.now();
+      } else if (typeof old.reservable === 'boolean') {
+        saved[t.id].reservable = old.reservable;
+        saved[t.id].checked    = old.checked;
+      }
+    });
     saveSavedTools(saved);
-    return JSON.stringify(saved) !== JSON.stringify(before);
+    return toolsKey(saved) !== toolsKey(before);
   }
 
   // /admin/tools/ lists every tool, so it replaces the saved list. /tools/
   // only lists tools you are authorized to use, so it adds to it.
   function rememberPageTools() {
     var re = TOOL_LINKS[page];
-    if (re) saveFoundTools(scrapeTools(document, re), page === 'admintools');
+    if (re) saveFoundTools(scrapeTools(document, re), page === 'admintools', page === 'tools');
   }
 
   // The agenda has no tool IDs, so it reads /admin/tools/ in the background.
@@ -235,9 +258,61 @@
         return res.text();
       })
       .then(function(html) {
-        var doc = new DOMParser().parseFromString(html, 'text/html');
-        return saveFoundTools(scrapeTools(doc, TOOL_LINKS.admintools), true);
+        var doc   = new DOMParser().parseFromString(html, 'text/html');
+        var found = scrapeTools(doc, TOOL_LINKS.admintools);
+        if (!found.length) throw new Error('no tools found');
+        return saveFoundTools(found, true, false);
       });
+  }
+
+  // "Requires Reservation?" on /admin/tools/<id>/edit/ is the flag the Tools
+  // page shows as "Reservation not required". Needs Manage Resources, like
+  // /admin/tools/ itself.
+  function fetchReservable(id) {
+    return fetch(location.origin + '/admin/tools/' + encodeURIComponent(id) + '/edit/', { cache: 'no-store' })
+      .then(function(res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.text();
+      })
+      .then(function(html) {
+        var box = new DOMParser().parseFromString(html, 'text/html').getElementById('is-reservable');
+        if (!box) throw new Error('no "Requires Reservation?" checkbox');
+        return box.hasAttribute('checked');
+      });
+  }
+
+  // Checks saved tools whose flag is missing or over a day old, four edit
+  // pages at a time. Resolves true if any flag changed.
+  var RECHECK_MS = 24 * 3600 * 1000;
+  function verifyReservable() {
+    var saved = loadSavedTools();
+    var ids = Object.keys(saved).filter(function(id) {
+      var t = saved[id];
+      return typeof t.reservable !== 'boolean' || typeof t.checked !== 'number' ||
+             Date.now() - t.checked > RECHECK_MS;
+    });
+    var changed = false, next = 0;
+
+    // Each result is saved as it arrives, so leaving the page keeps what was checked.
+    function worker() {
+      if (next >= ids.length) return Promise.resolve();
+      var id = ids[next++];
+      return fetchReservable(id).then(
+        function(r) {
+          var current = loadSavedTools();
+          if (!current[id]) return;
+          if (current[id].reservable !== r) changed = true;
+          current[id].reservable = r;
+          current[id].checked    = Date.now();
+          saveSavedTools(current);
+        },
+        function(err) { console.warn('EDH Waterfall: could not check /admin/tools/' + id + '/edit/', err); }
+      ).then(worker);
+    }
+
+    var workers = [];
+    for (var i = 0; i < 4; i++) workers.push(worker());
+    return Promise.all(workers).then(function() { return changed; });
   }
 
   function forgetTools(tools) {
@@ -246,13 +321,14 @@
     saveSavedTools(saved);
   }
 
-  // Saved tools plus TOOL_IDS: [{ id, tool, model, manual }]
+  // Saved tools plus TOOL_IDS: [{ id, tool, model, reservable, manual }]
   function knownTools() {
     var saved = loadSavedTools();
     var byId = {}, list = [];
 
     Object.keys(saved).forEach(function(id) {
-      byId[id] = { id: id, tool: saved[id].tool, model: saved[id].model, manual: false };
+      byId[id] = { id: id, tool: saved[id].tool, model: saved[id].model,
+                   reservable: saved[id].reservable, manual: false };
       list.push(byId[id]);
     });
 
@@ -270,6 +346,21 @@
     });
 
     return list;
+  }
+
+  // Waterfalls only use tools known to take reservations (or set in
+  // TOOL_IDS); "Reservation not required" and not-yet-checked tools are left out.
+  function isShown(t) {
+    return t.manual || t.reservable === true;
+  }
+
+  // Printer names whose saved tools are all "Reservation not required", so
+  // even a MODELS entry with that name gets no idle row.
+  function notReservableModels() {
+    var tools = knownTools();
+    return uniq(tools.filter(function(t) { return t.reservable === false && !t.manual; })
+                     .map(function(t) { return t.model; }))
+      .filter(function(m) { return !tools.some(function(t) { return t.model === m && isShown(t); }); });
   }
 
   // An unknown ID redirects to /tools/ ("That tool does not exist"); that
@@ -753,7 +844,7 @@
           optHtml('toolsPage', 'Tools page' + (page === 'tools' ? ' (this page)' : ''),
                   'designhub-manager.unl.edu/tools/ \u2014 loads each saved tool\u2019s reservations.json (no login needed)') +
           optHtml('agendaPage', 'Agenda page' + (page === 'agenda' ? ' (this page)' : ''),
-                  '/admin/agenda/ \u2014 built from the Today\u2019s Reservations table; SHOW ALL lists every saved tool') +
+                  '/admin/agenda/ \u2014 built from the Today\u2019s Reservations table; SHOW ALL lists every saved tool that takes reservations') +
           '<h3>Chart</h3>' +
           optHtml('showIdle', 'Show idle printers by default',
                   'Start in SHOW ALL RESERVATIONS mode instead of active only') +
@@ -810,15 +901,21 @@
     } else {
       html += '<table class="edh-set-ids"><thead><tr><th>Tool ID</th><th>Tool</th><th>Printer</th></tr></thead><tbody>';
       tools.forEach(function(t) {
+        var note = t.manual ? 'from TOOL_IDS' :
+                   t.reservable === false ? 'reservation not required, hidden' :
+                   t.reservable !== true ? 'not checked yet, hidden' : '';
         html += '<tr><td class="edh-id">' + esc(t.id) + '</td><td>' + esc(t.tool) + '</td><td>' + esc(t.model) +
-                (t.manual ? ' <small>(from TOOL_IDS)</small>' : '') + '</td></tr>';
+                (note ? ' <small>(' + note + ')</small>' : '') + '</td></tr>';
       });
       html += '</tbody></table>';
     }
     html += '<p class="edh-set-note">Tools are saved whenever you open the Tools page or the admin Tools page ' +
       '(/admin/tools/). The Agenda page also reads /admin/tools/ in the background, if your account can open it. ' +
       'The admin page lists every tool, so reading it replaces this list. The Tools page only ' +
-      'lists tools you are authorized to use, so it adds to the list. Both waterfalls use every tool here.</p>';
+      'lists tools you are authorized to use, so it adds to the list.</p>' +
+      '<p class="edh-set-note">The waterfalls leave out tools that don’t require a reservation. Tools linked ' +
+      'from the Tools page take reservations; any other tool is checked on its admin edit page ' +
+      '(“Requires Reservation?”) at most once a day, and stays hidden until it has been checked.</p>';
     if (Object.keys(loadSavedTools()).length) {
       html += '<button type="button" class="edh-set-btn" data-act="forget">Forget saved tools</button>';
     }
@@ -883,10 +980,13 @@
       // We don't return here so it can still draw an empty grid showing "No reservations today"
     }
 
-    // Rows: MODELS, then every saved tool, then anything else reserved today.
+    // Rows: MODELS, then every saved tool that takes reservations, then
+    // anything else reserved today.
     function rows() {
+      var off = notReservableModels();
       var models = MODELS
-        .concat(knownTools().map(function(t) { return t.model; }))
+        .concat(knownTools().filter(isShown).map(function(t) { return t.model; }))
+        .filter(function(m) { return off.indexOf(m) === -1; })
         .concat(reservations.map(function(r) { return r.model; }));
       return orderModels(uniq(models));
     }
@@ -895,18 +995,24 @@
     chart.setData(reservations, rows());
     table.parentNode.insertBefore(chart.el, table);
 
-    refreshToolsFromAdmin().then(function(changed) {
-      if (changed) chart.setData(reservations, rows());
-    }, function(err) {
-      console.warn('EDH Waterfall: could not read /admin/tools/, using the saved tool list.', err);
-    });
+    refreshToolsFromAdmin()
+      .then(function(changed) {
+        if (changed) chart.setData(reservations, rows());
+        return verifyReservable();
+      })
+      .then(function(changed) {
+        if (changed) chart.setData(reservations, rows());
+      })
+      .catch(function(err) {
+        console.warn('EDH Waterfall: could not read /admin/tools/, using the saved tool list.', err);
+      });
     return chart;
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  //  MOUNT — Tools page. Only saved tools (and TOOL_IDS) that loaded
-  //  get rows, so "idle" never means "not checked". While minimized,
-  //  nothing is fetched until the chart is expanded.
+  //  MOUNT — Tools page. Only saved tools that take reservations (and
+  //  TOOL_IDS) that loaded get rows, so "idle" never means "not checked".
+  //  While minimized, nothing is fetched until the chart is expanded.
   // ═══════════════════════════════════════════════════════════════════
   function mountTools() {
     var anchor = document.getElementById('tools-list-table') ||
@@ -930,7 +1036,7 @@
       if (started) return;
       started = true;
 
-      var tools = knownTools();
+      var tools = knownTools().filter(isShown);
       if (!tools.length) {
         chart.setMessage('No tools found on this page or saved yet.');
         chart.setData([], []);
@@ -1009,6 +1115,9 @@
     page = detectPage();
     if (!page) return;
     rememberPageTools();
+    if (page === 'admintools') {
+      verifyReservable().catch(function(err) { console.warn('EDH Waterfall: reservable check failed', err); });
+    }
     if (typeof GM_registerMenuCommand === 'function') {
       GM_registerMenuCommand('\u2699 Waterfall settings', openSettings);
     }
