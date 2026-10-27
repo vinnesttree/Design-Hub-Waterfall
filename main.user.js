@@ -148,7 +148,8 @@
 
       if (!start || !end) return;
       model = findModel(model) || model || tool;   // same names as the saved tool list
-      out.push({ name: name, label: name.split(' ')[0], tool: tool, model: model, start: start, end: end });
+      var lockout = name.toLowerCase().indexOf('lockout') !== -1;
+      out.push({ name: name, label: name.split(' ')[0], tool: tool, model: model, start: start, end: end, is_lockout: lockout });
     });
 
     return out;
@@ -404,12 +405,13 @@
     var start = parseTime(row.start_time);
     var end   = parseTime(row.end_time);
     if (!start || !end) return null;
+    var lockout  = !!row.is_lockout || row.name === 'Lockout';
     var training = !!row.is_training;
     var title    = row.title ? String(row.title).trim() : '';
     return {
-      name:  title || (training ? 'Training' : 'Reserved'),
+      name:  title || (lockout ? 'Lockout' : (training ? 'Training' : 'Reserved')),
       label: title || (fmtH(start) + '\u2013' + fmtH(end)),
-      note:  training ? 'Training reservation' : '',
+      note:  lockout ? 'Tool lockout' : (training ? 'Training reservation' : ''),
       tool:  tool.tool,
       model: tool.model,
       start: start,
