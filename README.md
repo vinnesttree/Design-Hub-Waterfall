@@ -24,5 +24,5 @@ If the site says a saved tool no longer exists, that tool is dropped from the li
 
 ## Settings and minimize
 
-- **⚙ on the chart header** (or **⚙ Waterfall settings** in the Tampermonkey menu) opens the settings page. There you can turn the waterfall on or off for the Tools page and the Agenda page, and choose to show idle printers by default. It also lists the saved tools. Settings save right away. While the waterfall is off, you can only reach the settings from the Tampermonkey menu.
+- **⚙ on the chart header** (or **⚙ Waterfall settings** in the Tampermonkey menu) opens the settings page. There you can turn the waterfall on or off for the Tools page and the Agenda page, choose to show idle printers by default, and choose how rows are sorted. **Sort printers by machine type** is on by default: it groups rows by tool (all Prusa MK4s together, and so on), with types A–Z. Within a type, rows keep the `MODELS` order, and printers whose type isn't known yet go last. Turn it off to use the plain `MODELS` order. The settings page also lists the saved tools. Settings save right away. While the waterfall is off, you can only reach the settings from the Tampermonkey menu.
 - **− on the chart header** minimizes the chart until you close the tab. While it is minimized, the Tools page doesn't fetch any reservations.
