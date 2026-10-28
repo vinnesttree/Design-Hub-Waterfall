@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Engineering Design Hub - Reservation Waterfall
 // @namespace    https://designhub-manager.unl.edu/
-// @version      1.2.2
+// @version      1.3.0
 // @description  Dark-mode Gantt chart of printer reservations on the Agenda and Tools pages - ordered models, dynamic tool colors, hide idle printers, settings and minimize
 // @match        *://designhub-manager.unl.edu/admin/agenda/*
 // @match        *://designhub-manager.unl.edu/agenda/*
@@ -17,7 +17,9 @@
   // ═══════════════════════════════════════════════════════════════════
   //  PRINTER LIST — edit this array to add/remove/reorder printers.
   //  Rows appear on the waterfall in exactly this order, top to bottom;
-  //  saved tools that aren't listed here come after them.
+  //  saved tools that aren't listed here come after them. With "Sort
+  //  printers by machine type" on (the default), rows are grouped by
+  //  tool and this order applies within each group.
   //  Printers with no reservations today are hidden unless you click
   //  "SHOW ALL RESERVATIONS".
   // ═══════════════════════════════════════════════════════════════════
@@ -73,7 +75,7 @@
   var SETTINGS_KEY  = 'edh-wf-settings';
   var TOOLS_KEY     = 'edh-wf-tools';
   var MINIMIZED_KEY = 'edh-wf-minimized';
-  var DEFAULTS = { toolsPage: true, agendaPage: true, showIdle: false };
+  var DEFAULTS = { toolsPage: true, agendaPage: true, showIdle: false, sortByType: true };
 
   var settings = loadSettings();
   var page     = null;   // 'tools' | 'admintools' | 'agenda'
@@ -426,6 +428,28 @@
     return list.filter(function(v, i) { return v && list.indexOf(v) === i; });
   }
 
+  // Machine type (the Tool column, e.g. "Prusa MK4") of each printer row,
+  // from the saved tools and the reservations being drawn.
+  function machineTypes(reservations) {
+    var types = {};
+    knownTools().forEach(function(t) { if (!types[t.model]) types[t.model] = t.tool; });
+    reservations.forEach(function(r) { if (!types[r.model]) types[r.model] = r.tool; });
+    return types;
+  }
+
+  // Groups rows by machine type, A-Z. Rows keep their order within a type,
+  // and printers whose type isn't known go last.
+  function sortByType(models, types) {
+    return models
+      .map(function(m, i) { return { m: m, i: i, t: (types[m] || '').toLowerCase() }; })
+      .sort(function(a, b) {
+        if (!a.t !== !b.t) return a.t ? -1 : 1;
+        if (a.t !== b.t)   return a.t < b.t ? -1 : 1;
+        return a.i - b.i;
+      })
+      .map(function(x) { return x.m; });
+  }
+
   // ═══════════════════════════════════════════════════════════════════
   //  CHART BOUNDS
   // ═══════════════════════════════════════════════════════════════════
@@ -561,7 +585,7 @@
     var minimized  = isMinimized();
     var loaded     = false;
 
-    var reservations = [], models = [], activeSet = {}, colorMap = {};
+    var reservations = [], models = [], activeSet = {}, colorMap = {}, types = {};
 
     var wrap = document.createElement('div');
     wrap.id = 'edh-wf';
@@ -597,6 +621,7 @@
     function setData(res, rowModels) {
       reservations = res;
       models       = rowModels;
+      types        = machineTypes(res);
       loaded       = true;
       activeSet    = {};
       reservations.forEach(function(r){
@@ -615,11 +640,12 @@
 
     function renderRows() {
       inner.querySelectorAll('.edh-row,.edh-sec,.edh-empty').forEach(function(el){ el.remove(); });
-      var activeModels = models.filter(function(m){ return activeSet[m]; });
+      var ordered = settings.sortByType ? sortByType(models, types) : models;
+      var activeModels = ordered.filter(function(m){ return activeSet[m]; });
       activeModels.forEach(function(m){ appendRow(m, true); });
 
       if (showingAll) {
-        var idleModels = models.filter(function(m){ return !activeSet[m]; });
+        var idleModels = ordered.filter(function(m){ return !activeSet[m]; });
         if (idleModels.length) {
           appendSec('\u25cb  No reservations today');
           idleModels.forEach(function(m){ appendRow(m, false); });
@@ -744,6 +770,7 @@
       setData: setData,
       setMessage: setMessage,
       setShowAll: setShowAll,
+      redraw: renderRows,
       isMinimized: function() { return minimized; }
     };
   }
@@ -846,6 +873,8 @@
           optHtml('agendaPage', 'Agenda page' + (page === 'agenda' ? ' (this page)' : ''),
                   '/admin/agenda/ \u2014 built from the Today\u2019s Reservations table; SHOW ALL lists every saved tool that takes reservations') +
           '<h3>Chart</h3>' +
+          optHtml('sortByType', 'Sort printers by machine type',
+                  'Groups rows by tool (e.g. all Prusa MK4s together), A–Z. Off: rows follow the MODELS list order') +
           optHtml('showIdle', 'Show idle printers by default',
                   'Start in SHOW ALL RESERVATIONS mode instead of active only') +
           '<p class="edh-set-note">Changes are saved right away. To hide the chart just for now, use ' +
@@ -863,6 +892,7 @@
         saveSettings();
         applySettings();
         if (key === 'showIdle' && mounted) mounted.setShowAll(settings.showIdle);
+        if (key === 'sortByType' && mounted) mounted.redraw();
       });
     });
     ov.querySelector('[data-act="close"]').addEventListener('click', closeSettings);
