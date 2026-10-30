@@ -1,13 +1,12 @@
 // ==UserScript==
 // @name         Engineering Design Hub - Reservation Waterfall
 // @namespace    https://designhub-manager.unl.edu/
-// @version      1.3.0
-// @description  Dark-mode Gantt chart of printer reservations on the Agenda and Tools pages - ordered models, dynamic tool colors, hide idle printers, settings and minimize
-// @match        *://designhub-manager.unl.edu/admin/agenda/*
-// @match        *://designhub-manager.unl.edu/agenda/*
-// @match        *://designhub-manager.unl.edu/tools*
-// @match        *://designhub-manager.unl.edu/admin/tools*
-// @match        */agenda/*
+// @version      1.4.0
+// @description  Dark-mode Gantt chart of tool reservations on the Agenda and Tools pages of UNL reservation sites (Engineering Design Hub, Innovation Studio, ...) - ordered rows, dynamic tool colors, hide idle tools, settings and minimize
+// @match        *://*.unl.edu/admin/agenda/*
+// @match        *://*.unl.edu/agenda/*
+// @match        *://*.unl.edu/tools*
+// @match        *://*.unl.edu/admin/tools*
 // @grant        GM_registerMenuCommand
 // ==/UserScript==
 
@@ -15,48 +14,75 @@
   'use strict';
 
   // ═══════════════════════════════════════════════════════════════════
-  //  PRINTER LIST — edit this array to add/remove/reorder printers.
-  //  Rows appear on the waterfall in exactly this order, top to bottom;
-  //  saved tools that aren't listed here come after them. With "Sort
-  //  printers by machine type" on (the default), rows are grouped by
-  //  tool and this order applies within each group.
-  //  Printers with no reservations today are hidden unless you click
+  //  SITES — the waterfall runs on unl.edu sites built on UNL's
+  //  reservations app (github.com/unl/reservations), such as the
+  //  Engineering Design Hub and Innovation Studio managers. A site that
+  //  isn't listed here uses DEFAULT_SITE. Each site keeps its own
+  //  settings and saved tools.
+  //
+  //  rowLabel — what each waterfall row is called:
+  //      'model'  the Model column. Design Hub names each printer there.
+  //      'tool'   "Tool · Model", or just the Tool when Model is empty.
+  //               Innovation Studio puts the maker in Model (its laser
+  //               cutters are all "Epilog"), so Model alone would merge
+  //               different machines into one row.
+  //
+  //  models — rows appear on the waterfall in exactly this order, top to
+  //  bottom; other rows come after them, A–Z. With "Sort rows by tool
+  //  type" on (the default), rows are grouped by tool and this order
+  //  applies within each group. Use the row names the waterfall shows.
+  //  Rows with no reservations today are hidden unless you click
   //  "SHOW ALL RESERVATIONS".
-  // ═══════════════════════════════════════════════════════════════════
-  const MODELS = [
-    'Ada',
-    'Archimedes',
-    'Faraday',
-    'Hull',
-    'Pearlman',
-    'Bernouli',
-    'Clarke',
-    'Euler',
-    'Johnson',
-    'Ohm',
-    'Emmy',
-    'Hedy',
-    'Mark',
-    'Ochoa',
-    'Kapany',
-    'Maiman',
-    'GoldenBee',
-    'GorgeousSquid',
-    'TangibleRabbit',
-  ];
-
-  // ═══════════════════════════════════════════════════════════════════
-  //  TOOL ID → PRINTER NAME — the script saves each tool's ID and
-  //  printer name (the "Model" column) whenever you open the Tools page
-  //  (/tools/) or the admin Tools page (/admin/tools/, which lists every
-  //  tool), so this is normally empty. Add a printer here only if
-  //  neither page shows it to you. Entries here win over saved ones.
+  //
+  //  toolIds — tool ID → row name. The script saves each tool's ID and
+  //  row name whenever you open the Tools page (/tools/) or the admin
+  //  Tools page (/admin/tools/, which lists every tool), so this is
+  //  normally empty. Add a tool here only if neither page shows it to
+  //  you. Entries here win over saved ones.
   //      123: 'Ada',
   //      124: { model: 'Hull', tool: 'Prusa MK4' },
   //  The saved tools are listed in the waterfall settings.
   // ═══════════════════════════════════════════════════════════════════
-  const TOOL_IDS = {
+  const SITES = {
+    'designhub-manager.unl.edu': {
+      rowLabel: 'model',
+      models: [
+        'Ada',
+        'Archimedes',
+        'Faraday',
+        'Hull',
+        'Pearlman',
+        'Bernouli',
+        'Clarke',
+        'Euler',
+        'Johnson',
+        'Ohm',
+        'Emmy',
+        'Hedy',
+        'Mark',
+        'Ochoa',
+        'Kapany',
+        'Maiman',
+        'GoldenBee',
+        'GorgeousSquid',
+        'TangibleRabbit',
+      ],
+      toolIds: {
+      },
+    },
+    'innovationstudio-manager.unl.edu': {
+      rowLabel: 'tool',
+      models: [
+      ],
+      toolIds: {
+      },
+    },
   };
+  const DEFAULT_SITE = { rowLabel: 'tool', models: [], toolIds: {} };
+
+  const SITE     = SITES[location.hostname] || DEFAULT_SITE;
+  const MODELS   = SITE.models;
+  const TOOL_IDS = SITE.toolIds;
 
   // ═══════════════════════════════════════════════════════════════════
   //  TOOL COLOR PALETTE — colors are assigned to tools in the order
@@ -149,7 +175,7 @@
       var end   = parseDT(parts[1].replace(/\n[\s\S]*/, '').trim());
 
       if (!start || !end) return;
-      model = findModel(model) || model || tool;   // same names as the saved tool list
+      model = rowName(tool, model);   // same names as the saved tool list
       out.push({ name: name, label: name.split(' ')[0], tool: tool, model: model, start: start, end: end });
     });
 
@@ -169,7 +195,7 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  //  TOOLS PAGE — map tool IDs to printer names, then load each tool's
+  //  TOOLS PAGE — map tool IDs to row names, then load each tool's
   //  day from GET /tools/<id>/reservations.json (no login needed)
   // ═══════════════════════════════════════════════════════════════════
   // /tools/ links each tool to /tools/<id>/reserve/ and /admin/tools/ to
@@ -192,6 +218,21 @@
     return null;
   }
 
+  // The row a tool is drawn on (see rowLabel in SITES). Called with the
+  // Tool and Model columns, which read the same on every page.
+  var ROW_SEP = ' \u00b7 ';
+  function rowName(tool, model) {
+    if (SITE.rowLabel === 'model') return findModel(model) || model || tool;
+    var text = model ? tool + ROW_SEP + model : tool;
+    return findModel(text) || text;
+  }
+
+  // The Model part of a row name, for the tooltip ('' if the row is just the tool).
+  function modelPart(row, tool) {
+    if (row.indexOf(tool + ROW_SEP) === 0) return row.slice((tool + ROW_SEP).length);
+    return row === tool ? '' : row;
+  }
+
   // Only rows in a table whose third column is headed "Model" are read.
   function scrapeTools(doc, re) {
     var found = [], seen = {};
@@ -207,13 +248,13 @@
       var tool  = cells[1].textContent.trim();
       var model = cells[2].textContent.trim();
       seen[m[1]] = true;
-      found.push({ id: m[1], tool: tool, model: findModel(model) || model || tool });
+      found.push({ id: m[1], tool: tool, model: rowName(tool, model) });
     });
 
     return found;
   }
 
-  // Tool name, printer name and reservable flag, for "did anything shown change?"
+  // Tool name, row name and reservable flag, for "did anything shown change?"
   function toolsKey(saved) {
     return JSON.stringify(Object.keys(saved).map(function(id) {
       return [id, saved[id].tool, saved[id].model, saved[id].reservable];
@@ -283,6 +324,20 @@
       });
   }
 
+  // Runs fn on each item, at most `limit` at a time, and resolves to the
+  // results in order. fn must handle its own errors.
+  function mapLimit(items, limit, fn) {
+    var results = [], next = 0;
+    function worker() {
+      if (next >= items.length) return Promise.resolve();
+      var i = next++;
+      return fn(items[i]).then(function(r) { results[i] = r; }).then(worker);
+    }
+    var workers = [];
+    for (var w = 0; w < limit; w++) workers.push(worker());
+    return Promise.all(workers).then(function() { return results; });
+  }
+
   // Checks saved tools whose flag is missing or over a day old, four edit
   // pages at a time. Resolves true if any flag changed.
   var RECHECK_MS = 24 * 3600 * 1000;
@@ -293,12 +348,10 @@
       return typeof t.reservable !== 'boolean' || typeof t.checked !== 'number' ||
              Date.now() - t.checked > RECHECK_MS;
     });
-    var changed = false, next = 0;
+    var changed = false;
 
     // Each result is saved as it arrives, so leaving the page keeps what was checked.
-    function worker() {
-      if (next >= ids.length) return Promise.resolve();
-      var id = ids[next++];
+    return mapLimit(ids, 4, function(id) {
       return fetchReservable(id).then(
         function(r) {
           var current = loadSavedTools();
@@ -309,12 +362,8 @@
           saveSavedTools(current);
         },
         function(err) { console.warn('EDH Waterfall: could not check /admin/tools/' + id + '/edit/', err); }
-      ).then(worker);
-    }
-
-    var workers = [];
-    for (var i = 0; i < 4; i++) workers.push(worker());
-    return Promise.all(workers).then(function() { return changed; });
+      );
+    }).then(function() { return changed; });
   }
 
   function forgetTools(tools) {
@@ -356,7 +405,7 @@
     return t.manual || t.reservable === true;
   }
 
-  // Printer names whose saved tools are all "Reservation not required", so
+  // Row names whose saved tools are all "Reservation not required", so
   // even a MODELS entry with that name gets no idle row.
   function notReservableModels() {
     var tools = knownTools();
@@ -419,17 +468,23 @@
     };
   }
 
+  // MODELS first, in that order, then the other rows A–Z.
   function orderModels(models) {
     return MODELS.filter(function(m){ return models.indexOf(m) !== -1; })
-      .concat(models.filter(function(m){ return MODELS.indexOf(m) === -1; }));
+      .concat(models.filter(function(m){ return MODELS.indexOf(m) === -1; }).sort(compareNames));
+  }
+
+  // A–Z, ignoring case, with numbers in order ("#2" before "#10").
+  function compareNames(a, b) {
+    return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
   }
 
   function uniq(list) {
     return list.filter(function(v, i) { return v && list.indexOf(v) === i; });
   }
 
-  // Machine type (the Tool column, e.g. "Prusa MK4") of each printer row,
-  // from the saved tools and the reservations being drawn.
+  // Machine type (the Tool column, e.g. "Prusa MK4") of each row, from
+  // the saved tools and the reservations being drawn.
   function machineTypes(reservations) {
     var types = {};
     knownTools().forEach(function(t) { if (!types[t.model]) types[t.model] = t.tool; });
@@ -438,14 +493,13 @@
   }
 
   // Groups rows by machine type, A-Z. Rows keep their order within a type,
-  // and printers whose type isn't known go last.
+  // and rows whose type isn't known go last.
   function sortByType(models, types) {
     return models
       .map(function(m, i) { return { m: m, i: i, t: (types[m] || '').toLowerCase() }; })
       .sort(function(a, b) {
         if (!a.t !== !b.t) return a.t ? -1 : 1;
-        if (a.t !== b.t)   return a.t < b.t ? -1 : 1;
-        return a.i - b.i;
+        return compareNames(a.t, b.t) || a.i - b.i;
       })
       .map(function(x) { return x.m; });
   }
@@ -572,7 +626,7 @@
   // ═══════════════════════════════════════════════════════════════════
   //  BUILD CHART — returns { el, setData, setMessage, setShowAll,
   //  isMinimized }. Rows are drawn once setData() supplies the
-  //  reservations and the printer rows to list, in order.
+  //  reservations and the rows to list, in order.
   // ═══════════════════════════════════════════════════════════════════
   function buildChart(opts) {
     ensureStyles();
@@ -627,6 +681,10 @@
       reservations.forEach(function(r){
         if (r.end > CS && r.start < CE) activeSet[r.model] = true;
       });
+      // Label column: about 6.5px a character, 96-260px. Longer names are
+      // cut off; hovering a label shows all of it.
+      var longest = models.reduce(function(n, m) { return Math.max(n, m.length); }, 0);
+      inner.style.setProperty('--lw', Math.max(96, Math.min(260, Math.ceil(longest * 6.5) + 12)) + 'px');
       var cm = buildColorMap(reservations);
       colorMap = cm.map;
       renderLegend(leg, cm.tools, colorMap);
@@ -827,10 +885,11 @@
   function showTip(e, r, color) {
     var tip = document.getElementById('edh-tip');
     var dur = Math.round((r.end - r.start) / 60000);
+    var model = modelPart(r.model, r.tool);
     tip.innerHTML =
       '<div class="tn">' + esc(r.name) + '</div>' +
       '<div class="tt"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' + color + ';vertical-align:middle;margin-right:5px"></span>' + esc(r.tool) + '</div>' +
-      '<div>Model: <strong style="color:#fff">' + esc(r.model) + '</strong></div>' +
+      (model ? '<div>Model: <strong style="color:#fff">' + esc(model) + '</strong></div>' : '') +
       '<div class="td">' + fmtDT(r.start) + ' \u2192 ' + fmtDT(r.end) + '</div>' +
       '<div class="tg">\u23f1 ' + dur + ' min\u00a0(' + (dur/60).toFixed(1) + ' hr)</div>' +
       (r.note ? '<div class="tx">' + esc(r.note) + '</div>' : '');
@@ -869,15 +928,16 @@
         '<div class="edh-set-body">' +
           '<h3>Show the waterfall on</h3>' +
           optHtml('toolsPage', 'Tools page' + (page === 'tools' ? ' (this page)' : ''),
-                  'designhub-manager.unl.edu/tools/ \u2014 loads each saved tool\u2019s reservations.json (no login needed)') +
+                  location.host + '/tools/ \u2014 loads each saved tool\u2019s reservations.json (no login needed)') +
           optHtml('agendaPage', 'Agenda page' + (page === 'agenda' ? ' (this page)' : ''),
                   '/admin/agenda/ \u2014 built from the Today\u2019s Reservations table; SHOW ALL lists every saved tool that takes reservations') +
           '<h3>Chart</h3>' +
-          optHtml('sortByType', 'Sort printers by machine type',
-                  'Groups rows by tool (e.g. all Prusa MK4s together), A–Z. Off: rows follow the MODELS list order') +
-          optHtml('showIdle', 'Show idle printers by default',
+          optHtml('sortByType', 'Sort rows by tool type',
+                  'Groups rows by the Tool column (e.g. all Prusa MK4s together), A–Z. Off: rows follow the models list in the script, then A–Z') +
+          optHtml('showIdle', 'Show idle tools by default',
                   'Start in SHOW ALL RESERVATIONS mode instead of active only') +
-          '<p class="edh-set-note">Changes are saved right away. To hide the chart just for now, use ' +
+          '<p class="edh-set-note">Settings and saved tools are kept separately for each site (' +
+            esc(location.host) + ' here). Changes are saved right away. To hide the chart just for now, use ' +
             '<code>\u2212</code> on its header: it stays minimized until you close this tab. ' +
             'While the waterfall is turned off, reopen these settings from the Tampermonkey menu ' +
             '(\u2699 Waterfall settings).</p>' +
@@ -925,13 +985,13 @@
 
   function savedToolsHtml() {
     var tools = knownTools();
-    var html = '<h3>Saved tools (tool ID \u2192 printer)</h3>';
+    var html = '<h3>Saved tools (tool ID \u2192 row)</h3>';
     if (!tools.length) {
       html += '<p class="edh-set-note">No tools saved yet.</p>';
     } else {
-      html += '<table class="edh-set-ids"><thead><tr><th>Tool ID</th><th>Tool</th><th>Printer</th></tr></thead><tbody>';
+      html += '<table class="edh-set-ids"><thead><tr><th>Tool ID</th><th>Tool</th><th>Row</th></tr></thead><tbody>';
       tools.forEach(function(t) {
-        var note = t.manual ? 'from TOOL_IDS' :
+        var note = t.manual ? 'from toolIds' :
                    t.reservable === false ? 'reservation not required, hidden' :
                    t.reservable !== true ? 'not checked yet, hidden' : '';
         html += '<tr><td class="edh-id">' + esc(t.id) + '</td><td>' + esc(t.tool) + '</td><td>' + esc(t.model) +
@@ -986,27 +1046,24 @@
   function mountAgenda() {
     // 1. Find the header specifically labeled "Today's Reservations"
     var resHeader = document.getElementById('todays-reservations');
-    var table = null;
-
-    if (resHeader) {
-      // The table should directly follow the header in the HTML DOM
-      table = resHeader.nextElementSibling;
-    }
-
-    // 2. Fallback: If the header logic missed it, target the specific UNL table styling classes
-    if (!table || table.tagName !== 'TABLE') {
-      table = document.querySelector('table.dcf-table.dcf-table-bordered');
-    }
-
-    if (!table) {
-      console.warn("EDH Waterfall Error: Could not find the reservations table on this page.");
+    if (!resHeader) {
+      console.warn("EDH Waterfall Error: Could not find Today's Reservations on this page.");
       return null;
     }
 
+    // 2. The table should directly follow the header in the HTML DOM.
+    // Fallback: the table described by that header. (Not the next
+    // dcf-table: on a day with no reservations there is no table, and that
+    // would be Today's Events.)
+    var table = resHeader.nextElementSibling;
+    if (!table || table.tagName !== 'TABLE') {
+      table = document.querySelector('table[aria-describedby="todays-reservations"]');
+    }
+
     // 3. Parse and build
-    var reservations = parseReservations(table);
+    var reservations = table ? parseReservations(table) : [];
     if (reservations.length === 0) {
-      console.log("EDH Waterfall: Table found, but no valid reservations were parsed today.");
+      console.log("EDH Waterfall: No valid reservations were found today.");
       // We don't return here so it can still draw an empty grid showing "No reservations today"
     }
 
@@ -1023,7 +1080,8 @@
 
     var chart = buildChart({ day: agendaDay(), showAll: settings.showIdle });
     chart.setData(reservations, rows());
-    table.parentNode.insertBefore(chart.el, table);
+    if (table) table.parentNode.insertBefore(chart.el, table);
+    else resHeader.parentNode.insertBefore(chart.el, resHeader.nextSibling);
 
     refreshToolsFromAdmin()
       .then(function(changed) {
@@ -1045,8 +1103,7 @@
   //  While minimized, nothing is fetched until the chart is expanded.
   // ═══════════════════════════════════════════════════════════════════
   function mountTools() {
-    var anchor = document.getElementById('tools-list-table') ||
-                 document.querySelector('table.dcf-table');
+    var anchor = document.getElementById('tools-list-table');
     if (!anchor) {
       console.warn("EDH Waterfall Error: Could not find the tool list on this page.");
       return null;
@@ -1073,15 +1130,16 @@
         return;
       }
 
+      // Six at a time: some sites have close to a hundred tools.
       chart.setMessage('Loading reservations for ' + tools.length + ' tools\u2026');
-      Promise.all(tools.map(function(t) {
+      mapLimit(tools, 6, function(t) {
         return fetchReservations(t.id, day).then(
           function(rows) { return { tool: t, rows: rows }; },
           function(err)  {
             console.warn('EDH Waterfall: could not load /tools/' + t.id + '/reservations.json (' + t.model + ')', err);
             return { tool: t, error: err || true };
           });
-      })).then(function(results) {
+      }).then(function(results) {
         var reservations = [], models = [], failed = [], missing = [];
         results.forEach(function(r) {
           if (r.error) {
@@ -1121,10 +1179,14 @@
   // ═══════════════════════════════════════════════════════════════════
   //  INIT
   // ═══════════════════════════════════════════════════════════════════
+  // The script runs on every unl.edu page with one of these paths, so each
+  // page must also have the heading the reservations app gives it.
   function detectPage() {
-    if (/^\/tools\/?$/.test(location.pathname)) return 'tools';
-    if (/^\/admin\/tools\/?$/.test(location.pathname)) return 'admintools';
-    if (/\/agenda(\/|$)/.test(location.pathname)) return 'agenda';
+    var path = location.pathname;
+    var has  = function(id) { return !!document.getElementById(id); };
+    if (/^\/tools\/?$/.test(path)       && has('tools-list-table'))    return 'tools';
+    if (/^\/admin\/tools\/?$/.test(path) && has('tool-list-header'))    return 'admintools';
+    if (/\/agenda(\/|$)/.test(path)     && has('todays-reservations')) return 'agenda';
     return null;
   }
 
